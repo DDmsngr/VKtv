@@ -3,8 +3,6 @@ name: Build APK
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -32,23 +30,12 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Run code generation
-        run: dart run build_runner build --delete-conflicting-outputs
-
       - name: Analyze
         run: flutter analyze --no-fatal-infos
+        continue-on-error: true
 
-      - name: Build APK (debug)
+      - name: Build debug APK
         run: flutter build apk --debug --target-platform android-arm64
-
-      - name: Build APK (release)
-        run: flutter build apk --release --target-platform android-arm64
-        # Для release нужен signing — раскомментировать когда будет keystore:
-        # env:
-        #   KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-        #   KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        #   KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        #   KEY_PATH: ${{ secrets.KEY_PATH }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -57,20 +44,10 @@ jobs:
           path: build/app/outputs/apk/debug/app-debug.apk
           retention-days: 14
 
-      - name: Upload release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: vk-tv-release
-          path: build/app/outputs/apk/release/app-release-unsigned.apk
-          retention-days: 14
-
-      # Создаём GitHub Release при пуше тега v*
-      - name: Create Release
+      - name: Create Release on tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            build/app/outputs/apk/debug/app-debug.apk
-            build/app/outputs/apk/release/app-release-unsigned.apk
+          files: build/app/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

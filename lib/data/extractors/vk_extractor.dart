@@ -20,29 +20,53 @@ class VkExtractorException implements Exception {
   String toString() => 'VkExtractorException: $message';
 }
 
-/// Извлекает прямую ссылку на видеопоток из URL страницы VK.
+/// Извлекает прямую ссылку на видеопоток из VK.
 ///
-/// Алгоритм (аналог yt-dlp vk extractor):
-///   1. GET страницы с заголовками браузера + сессионной cookie
-///   2. Ищем playerParams / video_player JSON в inline-скриптах
-///   3. Извлекаем HLS (.m3u8) или прямые MP4 ссылки
-///   4. Fallback: regexp на любые .m3u8/.mp4 в HTML
+/// Алгоритм:
+///   1. Пользователь логинится через WebView — сохраняем cookie сессии
+///   2. GET страницы видео — парсим hash для al_video.php
+///   3. POST https://vk.com/al_video.php с act=show_inline
+///   4. Из JSON ответа берём hls / url1080 / url720 ...
+///   5. Fallback: парсинг playerParams из HTML
 class VkExtractor {
   static const _ua =
       'Mozilla/5.0 (Linux; Android 13; Pixel 7) '
       'AppleWebKit/537.36 (KHTML, like Gecko) '
       'Chrome/120.0.0.0 Mobile Safari/537.36';
 
-  String? _cookie;
+  String? _sessionCookie;
+  bool get isAuthorized => _sessionCookie != null && _sessionCookie!.isNotEmpty;
 
-  void setSessionCookie(String cookie) => _cookie = cookie;
+  /// Вызывается после логина через WebView.
+  /// cookies — строка вида "remixsid=xxx; remixdt=yyy; ..."
+  void setSessionCookie(String cookies) {
+    _sessionCookie = cookies;
+  }
 
-  /// Основная точка входа. Возвращает список ссылок по убыванию приоритета:
-  /// HLS → 1080p → 720p → 480p → 360p
+  void clearSession() {
+    _sessionCookie = null;
+  }
+
+  /// Основная точка входа.
+  /// Возвращает список стримов: HLS > 1080p > 720p > 480p > 360p
   Future<List<VkStreamResult>> extract(String url) async {
-    final normalized = _normalize(url);
-    final html = await _fetch(normalized);
+    final videoId = _parseVideoId(url);
+    if (videoId == null) {
+      throw VkExtractorException('Не удалось распознать video ID из URL: $url');
+    }
 
+    // Способ 1: al_video.php (требует авторизацию)
+    if (isAuthorized) {
+      try {
+        final results = await _extractViaAlVideo(url, videoId);
+        if (results.isNotEmpty) return results;
+      } catch (_) {
+        // fallback на парсинг HTML
+      }
+    }
+
+    // Способ 2: парсинг HTML
+    final html = await _fetchPage(url);
     for (final parser in [
       _parsePlayerParams,
       _parseVideoPlayerJson,
@@ -52,44 +76,135 @@ class VkExtractor {
       if (results.isNotEmpty) return results;
     }
 
-    throw const VkExtractorException(
-      'Видеопоток не найден. Проверьте доступность видео и авторизацию.',
+    throw VkExtractorException(
+      isAuthorized
+          ? 'Видеопоток не найден. Видео удалено или закрыто.'
+          : 'Требуется авторизация. Войдите в аккаунт VK.',
     );
   }
 
-  String _normalize(String url) {
-    final uri = Uri.parse(url);
-    final z = uri.queryParameters['z'];
-    if (z != null && z.startsWith('video')) {
-      return 'https://vk.com/$z';
+  // ── al_video.php ──────────────────────────────────────────────────────────
+
+  Future<List<VkStreamResult>> _extractViaAlVideo(
+    String pageUrl,
+    String videoId,
+  ) async {
+    final html = await _fetchPage(pageUrl);
+    final hash = _extractHash(html, videoId);
+
+    final body = <String, String>{
+      'act': 'show_inline',
+      'video': videoId,
+    };
+    if (hash != null) body['hash'] = hash;
+
+    final response = await http.post(
+      Uri.parse('https://vk.com/al_video.php'),
+      headers: {
+        'User-Agent': _ua,
+        'Cookie': _sessionCookie!,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': pageUrl,
+        'Origin': 'https://vk.com',
+      },
+      body: body,
+    );
+
+    if (response.statusCode != 200) {
+      throw VkExtractorException('al_video.php: HTTP ${response.statusCode}');
     }
-    return url;
+
+    return _parseAlVideoResponse(utf8.decode(response.bodyBytes));
   }
 
-  Future<String> _fetch(String url) async {
-    final resp = await http.get(Uri.parse(url), headers: {
-      'User-Agent': _ua,
-      'Accept-Language': 'ru-RU,ru;q=0.9',
-      'Referer': 'https://vk.com/',
-      if (_cookie != null) 'Cookie': _cookie!,
-    });
+  List<VkStreamResult> _parseAlVideoResponse(String body) {
+    final results = <VkStreamResult>[];
 
-    if (resp.statusCode == 403) {
-      throw const VkExtractorException('403: требуется авторизация');
+    // VK оборачивает ответ в HTML-комментарий <!-- {...} -->
+    String jsonStr = body;
+    final commentMatch =
+        RegExp(r'<!--(.+?)-->', dotAll: true).firstMatch(body);
+    if (commentMatch != null) {
+      jsonStr = commentMatch.group(1)!.trim();
     }
-    if (resp.statusCode != 200) {
-      throw VkExtractorException('HTTP ${resp.statusCode}');
+
+    try {
+      final data = jsonDecode(jsonStr);
+
+      // Структура: {"payload": [0, [{"player": {...}}, ...]]}
+      if (data is Map) {
+        final payload = data['payload'];
+        if (payload is List && payload.length > 1) {
+          final inner = payload[1];
+          if (inner is List) {
+            for (final item in inner) {
+              if (item is Map) {
+                _deepSearchUrls(item, results);
+              }
+            }
+          }
+        }
+        // Иногда данные в корне
+        if (results.isEmpty) {
+          _deepSearchUrls(data as Map<dynamic, dynamic>, results);
+        }
+      }
+    } catch (_) {
+      results.addAll(_parseDirectLinks(body));
     }
-    return utf8.decode(resp.bodyBytes);
+
+    return results;
   }
 
-  // ── Парсеры ────────────────────────────────────────────────────────────────
+  /// Рекурсивно ищет ключи hls/url1080/url720 в любом уровне вложенности
+  void _deepSearchUrls(
+    Map<dynamic, dynamic> map,
+    List<VkStreamResult> out,
+  ) {
+    try {
+      final extracted = _urls(map.cast<String, dynamic>());
+      out.addAll(extracted);
+    } catch (_) {}
+
+    for (final value in map.values) {
+      if (value is Map) {
+        _deepSearchUrls(value, out);
+      } else if (value is List) {
+        for (final item in value) {
+          if (item is Map) _deepSearchUrls(item, out);
+        }
+      }
+    }
+  }
+
+  // ── Парсинг hash ──────────────────────────────────────────────────────────
+
+  String? _extractHash(String html, String videoId) {
+    // Вариант 1: data-hash рядом с video ID
+    final escaped = RegExp.escape(videoId);
+    final m1 = RegExp('$escaped[^"]*"[^"]*"([a-f0-9]{16,})"')
+        .firstMatch(html)
+        ?.group(1);
+    if (m1 != null) return m1;
+
+    // Вариант 2: "hash":"..." в любом JSON на странице
+    final m2 = RegExp(r'"hash"\s*:\s*"([a-f0-9]{16,})"')
+        .firstMatch(html)
+        ?.group(1);
+    return m2;
+  }
+
+  // ── HTML парсеры (fallback) ───────────────────────────────────────────────
 
   List<VkStreamResult> _parsePlayerParams(String html) {
     final patterns = [
       RegExp(r'playerParams\s*=\s*(\{.+?\})\s*;', dotAll: true),
       RegExp(r'"params"\s*:\s*\[(\{.+?\})\]', dotAll: true),
-      RegExp(r'var\s+params\s*=\s*(\{[^;]+?"hls"[^;]+?\})\s*;', dotAll: true),
+      RegExp(
+        r'var\s+params\s*=\s*(\{[^;]+"hls"[^;]+?\})\s*;',
+        dotAll: true,
+      ),
     ];
     for (final re in patterns) {
       final m = re.firstMatch(html);
@@ -120,28 +235,97 @@ class VkExtractor {
     return results;
   }
 
-  List<VkStreamResult> _parseDirectLinks(String html) {
+  List<VkStreamResult> _parseDirectLinks(String body) {
     final results = <VkStreamResult>[];
-    for (final m in RegExp(r'https?://[^\s"\']+\.m3u8[^\s"\']*').allMatches(html)) {
-      results.add(VkStreamResult(url: m.group(0)!, quality: 'hls', isHls: true));
+
+    // Используем строковую конкатенацию чтобы избежать проблем с кавычками в regex
+    final quote = '"';
+    final m3u8Re = RegExp(
+      'https?://[^\\s$quote' + r"'" + r'\\]+\.m3u8[^\s' + quote + r"'" + r'\\]*',
+    );
+    for (final m in m3u8Re.allMatches(body)) {
+      final url = m.group(0)!;
+      if (!results.any((r) => r.url == url)) {
+        results.add(VkStreamResult(url: url, quality: 'hls', isHls: true));
+      }
     }
-    for (final m in RegExp(r'https?://[^\s"\']+\.mp4[^\s"\']*').allMatches(html)) {
-      results.add(VkStreamResult(url: m.group(0)!, quality: 'mp4', isHls: false));
+
+    final mp4Re = RegExp(
+      'https?://[^\\s$quote' + r"'" + r'\\]+\.mp4[^\s' + quote + r"'" + r'\\]*',
+    );
+    for (final m in mp4Re.allMatches(body)) {
+      final url = m.group(0)!;
+      if (!results.any((r) => r.url == url)) {
+        results.add(VkStreamResult(url: url, quality: 'mp4', isHls: false));
+      }
     }
+
     return results;
+  }
+
+  // ── Вспомогательные ──────────────────────────────────────────────────────
+
+  /// Парсит video ID из любого формата VK URL.
+  /// Форматы:
+  ///   https://vk.com/video-12345_67890       -> -12345_67890
+  ///   https://vkvideo.ru/video-12345_67890   -> -12345_67890
+  ///   https://vk.com/video?z=video-12345_67890
+  String? _parseVideoId(String url) {
+    final patterns = [
+      RegExp(r'video(-?\d+_\d+)'),
+      RegExp(r'z=video(-?\d+_\d+)'),
+    ];
+    for (final re in patterns) {
+      final m = re.firstMatch(url);
+      if (m != null) {
+        final raw = m.group(1)!;
+        // Убедимся что начинается с минуса (group ID)
+        return raw.startsWith('-') ? raw : '-$raw';
+      }
+    }
+    return null;
+  }
+
+  Future<String> _fetchPage(String url) async {
+    final resp = await http.get(Uri.parse(url), headers: {
+      'User-Agent': _ua,
+      'Accept-Language': 'ru-RU,ru;q=0.9',
+      'Referer': 'https://vk.com/',
+      if (_sessionCookie != null) 'Cookie': _sessionCookie!,
+    });
+
+    if (resp.statusCode == 403) {
+      throw const VkExtractorException('403: требуется авторизация');
+    }
+    if (resp.statusCode != 200) {
+      throw VkExtractorException('HTTP ${resp.statusCode}');
+    }
+    return utf8.decode(resp.bodyBytes);
   }
 
   List<VkStreamResult> _urls(Map<String, dynamic> data) {
     final results = <VkStreamResult>[];
-    if (data['hls'] is String && (data['hls'] as String).isNotEmpty) {
-      results.add(VkStreamResult(url: data['hls'] as String, quality: 'hls', isHls: true));
+
+    final hls = data['hls'];
+    if (hls is String && hls.isNotEmpty) {
+      results.add(VkStreamResult(url: hls, quality: 'hls', isHls: true));
     }
-    const keys = {'url1080': '1080p', 'url720': '720p', 'url480': '480p', 'url360': '360p'};
-    for (final e in keys.entries) {
-      if (data[e.key] is String && (data[e.key] as String).isNotEmpty) {
-        results.add(VkStreamResult(url: data[e.key] as String, quality: e.value, isHls: false));
+
+    const qualityMap = {
+      'url1080': '1080p',
+      'url720': '720p',
+      'url480': '480p',
+      'url360': '360p',
+      'url240': '240p',
+    };
+
+    for (final entry in qualityMap.entries) {
+      final v = data[entry.key];
+      if (v is String && v.isNotEmpty) {
+        results.add(VkStreamResult(url: v, quality: entry.value, isHls: false));
       }
     }
+
     return results;
   }
 }

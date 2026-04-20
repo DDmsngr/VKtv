@@ -1,0 +1,175 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import '../../core/di/providers.dart';
+
+/// Экран авторизации через встроенный WebView.
+/// После успешного логина перехватываем cookie и сохраняем в VkExtractor.
+class AuthScreen extends ConsumerStatefulWidget {
+  const AuthScreen({super.key});
+
+  @override
+  ConsumerState<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends ConsumerState<AuthScreen> {
+  InAppWebViewController? _webViewController;
+  bool _loading = true;
+  String _status = 'Загрузка...';
+
+  static const _loginUrl = 'https://vk.com/login';
+  static const _successUrls = ['vk.com/feed', 'vk.com/video', 'vkvideo.ru'];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: KeyboardListener(
+        autofocus: true,
+        focusNode: FocusNode(),
+        onKeyEvent: (event) {
+          if (event is KeyDownEvent &&
+              (event.logicalKey == LogicalKeyboardKey.escape ||
+               event.logicalKey == LogicalKeyboardKey.goBack)) {
+            context.pop();
+          }
+        },
+        child: Stack(
+          children: [
+            InAppWebView(
+              initialUrlRequest: URLRequest(
+                url: WebUri(_loginUrl),
+              ),
+              initialSettings: InAppWebViewSettings(
+                userAgent:
+                    'Mozilla/5.0 (Linux; Android 13; Pixel 7) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Mobile Safari/537.36',
+                javaScriptEnabled: true,
+                domStorageEnabled: true,
+                databaseEnabled: true,
+              ),
+              onWebViewCreated: (controller) {
+                _webViewController = controller;
+              },
+              onLoadStart: (controller, url) {
+                setState(() {
+                  _loading = true;
+                  _status = 'Загрузка...';
+                });
+                _checkIfLoggedIn(url?.toString() ?? '');
+              },
+              onLoadStop: (controller, url) async {
+                setState(() => _loading = false);
+                await _tryExtractCookies(url?.toString() ?? '');
+              },
+              onProgressChanged: (controller, progress) {
+                setState(() {
+                  _status = 'Загрузка $progress%';
+                });
+              },
+            ),
+
+            // Индикатор загрузки
+            if (_loading)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: LinearProgressIndicator(
+                  backgroundColor: Colors.transparent,
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                    Color(0xFF5181B8),
+                  ),
+                ),
+              ),
+
+            // Статус бар сверху
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                color: Colors.black87,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () => context.pop(),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Войти в VK',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      _status,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _checkIfLoggedIn(String url) {
+    final isSuccess = _successUrls.any((u) => url.contains(u));
+    if (isSuccess) {
+      setState(() => _status = 'Получение сессии...');
+    }
+  }
+
+  Future<void> _tryExtractCookies(String url) async {
+    final isSuccess = _successUrls.any((u) => url.contains(u));
+    if (!isSuccess) return;
+
+    // Извлекаем все cookie для vk.com
+    final cookieManager = CookieManager.instance();
+    final cookies = await cookieManager.getCookies(
+      url: WebUri('https://vk.com'),
+    );
+
+    // Ищем ключевые куки сессии
+    final sessionCookies = cookies.where((c) =>
+        c.name == 'remixsid' ||
+        c.name == 'remixdt' ||
+        c.name == 'remixlhk' ||
+        c.name == 'remixuas');
+
+    if (sessionCookies.isEmpty) return;
+
+    // Собираем строку cookie
+    final cookieStr = cookies
+        .map((c) => '${c.name}=${c.value}')
+        .join('; ');
+
+    // Сохраняем в экстракторе
+    ref.read(vkExtractorProvider).setSessionCookie(cookieStr);
+
+    setState(() => _status = 'Авторизован!');
+
+    // Возвращаемся назад с результатом
+    if (mounted) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (mounted) context.pop(true);
+    }
+  }
+}

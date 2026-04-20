@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../presentation/home/home_screen.dart';
 import '../../presentation/player/player_screen.dart';
+import '../../presentation/auth/auth_screen.dart';
 
 final appRouterProvider = Provider<GoRouter>((ref) {
   return GoRouter(
@@ -20,6 +21,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             title: extra['title'] ?? '',
           );
         },
+      ),
+      GoRoute(
+        path: '/auth',
+        builder: (context, state) => const AuthScreen(),
       ),
     ],
   );
