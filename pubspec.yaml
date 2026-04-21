@@ -27,10 +27,13 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^3.0.0
 
-# Транзитивные зависимости media_kit_video обновились до версий,
-# требующих Flutter 3.22+ и новый plugin loader. Мы на 3.24 — пиним
-# ДО версий с breaking Gradle (wakelock_plus 1.3+ и package_info_plus 9+).
+# Пиним транзитивные зависимости под Flutter 3.24.
+# media_kit_video 1.3.x использует новый TextureRegistry.SurfaceProducer API,
+# который появился в Flutter 3.29+.
+# wakelock_plus 1.3+ и package_info_plus 9+ требуют нового plugin loader.
 dependency_overrides:
+  media_kit_video: '>=1.2.0 <1.3.0'
+  media_kit_libs_android_video: '>=1.3.0 <1.4.0'
   package_info_plus: '>=5.0.0 <9.0.0'
   wakelock_plus: '>=1.1.0 <1.3.0'
 
