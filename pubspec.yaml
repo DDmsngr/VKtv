@@ -28,11 +28,11 @@ dev_dependencies:
   flutter_lints: ^3.0.0
 
 # Транзитивные зависимости media_kit_video обновились до версий,
-# требующих Flutter 3.35+ (новый plugin loader). Мы на 3.24 — пиним.
+# требующих Flutter 3.22+ и новый plugin loader. Мы на 3.24 — пиним
+# ДО версий с breaking Gradle (wakelock_plus 1.3+ и package_info_plus 9+).
 dependency_overrides:
-  package_info_plus: ^8.0.2
-  wakelock_plus: ^1.2.8
-  screen_brightness_android: ^0.1.0
+  package_info_plus: '>=5.0.0 <9.0.0'
+  wakelock_plus: '>=1.1.0 <1.3.0'
 
 flutter:
   uses-material-design: true
