@@ -33,13 +33,6 @@ jobs:
           cp -rn /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/ 2>/dev/null || true
           echo "flutter.sdk=$(which flutter | sed 's|/bin/flutter||')" > android/local.properties
 
-      - name: Debug gradle files
-        run: |
-          find . -name "*.gradle" | xargs grep -l "shrinkResources" 2>/dev/null || echo "shrinkResources not found"
-          find . -name "*.gradle" | xargs grep -l "shrink" 2>/dev/null || echo "shrink not found"
-          cat android/app/build.gradle
-          cat android/gradle.properties
-
       - name: Get dependencies
         run: flutter pub get
 
@@ -48,7 +41,7 @@ jobs:
         continue-on-error: true
 
       - name: Build debug APK
-        run: flutter build apk --debug --target-platform android-arm64
+        run: flutter build apk --debug --target-platform android-arm64 --no-shrink
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
