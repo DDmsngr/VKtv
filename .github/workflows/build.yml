@@ -27,11 +27,13 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Scaffold missing Flutter files
+      - name: Setup local.properties
         run: |
+          FLUTTER_SDK=$(which flutter | sed 's|/bin/flutter||')
+          echo "flutter.sdk=$FLUTTER_SDK" > local.properties
+          echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
           flutter create --project-name vk_tv --org ru.vktv /tmp/scaffold
-          cp -rn /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/ 2>/dev/null || true
-          echo "flutter.sdk=$(which flutter | sed 's|/bin/flutter||')" > android/local.properties
+          cp /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/ 2>/dev/null || true
 
       - name: Get dependencies
         run: flutter pub get

@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace "ru.vktv.app"
-    compileSdk 34
+    compileSdk 36
     ndkVersion "25.1.8937393"
 
     compileOptions {
@@ -21,7 +21,7 @@ android {
     defaultConfig {
         applicationId "ru.vktv.app"
         minSdk 21
-        targetSdk 34
+        targetSdk 36
         versionCode 1
         versionName "0.1.0"
     }
