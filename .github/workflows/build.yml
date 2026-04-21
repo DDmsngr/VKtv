@@ -9,7 +9,6 @@ jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,42 +26,50 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Setup project
+      # gradle-wrapper.jar обычно в .gitignore — берём из свежего scaffold.
+      # НИЧЕГО ДРУГОГО НЕ ТРОГАЕМ, особенно settings.gradle и build.gradle —
+      # они нужны Gradle чтобы понять layout проекта.
+      - name: Restore gradle-wrapper.jar
         run: |
-          FLUTTER_SDK=$(which flutter | sed 's|/bin/flutter||')
+          if [ ! -f android/gradle/wrapper/gradle-wrapper.jar ]; then
+            TMP=$(mktemp -d)
+            flutter create --project-name _dummy --org _.dummy "$TMP/scaffold"
+            cp "$TMP/scaffold/android/gradle/wrapper/gradle-wrapper.jar" \
+               android/gradle/wrapper/gradle-wrapper.jar
+            rm -rf "$TMP"
+          fi
 
-          # Создаём scaffold во временную папку
-          flutter create --project-name vk_tv --org ru.vktv /tmp/scaffold
-
-          # Копируем gradle wrapper jar
-          cp /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar \
-             android/gradle/wrapper/
-
-          # Убираем дублирующие android-level файлы — Flutter использует корневые
-          rm -f android/settings.gradle
-          rm -f android/build.gradle
-
-          # local.properties в обоих местах
-          echo "flutter.sdk=$FLUTTER_SDK" > local.properties
+      # local.properties нужен ТОЛЬКО в android/, больше нигде.
+      - name: Write local.properties
+        run: |
+          FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
 
-          # Проверяем что наш MainActivity на месте
+      - name: Show diagnostic info
+        run: |
+          echo "--- pubspec.yaml ---"
+          cat pubspec.yaml
+          echo "--- android/settings.gradle ---"
+          cat android/settings.gradle
+          echo "--- android/build.gradle ---"
+          cat android/build.gradle
+          echo "--- android/app/build.gradle ---"
+          cat android/app/build.gradle
+          echo "--- AndroidManifest flutterEmbedding ---"
+          grep -A1 "flutterEmbedding" android/app/src/main/AndroidManifest.xml \
+            || echo "WARNING: flutterEmbedding meta-data not found"
           echo "--- MainActivity.kt ---"
           cat android/app/src/main/kotlin/ru/vktv/app/MainActivity.kt
 
-          # Проверяем манифест на flutterEmbedding
-          echo "--- AndroidManifest ---"
-          grep -A1 "flutterEmbedding" android/app/src/main/AndroidManifest.xml || echo "WARNING: flutterEmbedding not found!"
-
-      - name: Get dependencies
+      - name: Flutter pub get
         run: flutter pub get
 
-      - name: Analyze
+      - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos
         continue-on-error: true
 
       - name: Build debug APK
-        run: flutter build apk --debug --target-platform android-arm64 --no-shrink
+        run: flutter build apk --debug --target-platform android-arm64
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
