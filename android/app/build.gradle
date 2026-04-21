@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace "ru.vktv.app"
-    compileSdk 36
+    compileSdk 34
     ndkVersion "25.1.8937393"
 
     compileOptions {
