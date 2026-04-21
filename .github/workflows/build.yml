@@ -34,6 +34,8 @@ jobs:
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
           flutter create --project-name vk_tv --org ru.vktv /tmp/scaffold
           cp /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/ 2>/dev/null || true
+          rm -f android/settings.gradle
+          rm -f android/build.gradle
 
       - name: Get dependencies
         run: flutter pub get
