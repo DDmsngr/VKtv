@@ -27,15 +27,32 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Setup local.properties
+      - name: Setup project
         run: |
           FLUTTER_SDK=$(which flutter | sed 's|/bin/flutter||')
-          echo "flutter.sdk=$FLUTTER_SDK" > local.properties
-          echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
+
+          # Создаём scaffold во временную папку
           flutter create --project-name vk_tv --org ru.vktv /tmp/scaffold
-          cp /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/ 2>/dev/null || true
+
+          # Копируем gradle wrapper jar
+          cp /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar \
+             android/gradle/wrapper/
+
+          # Убираем дублирующие android-level файлы — Flutter использует корневые
           rm -f android/settings.gradle
           rm -f android/build.gradle
+
+          # local.properties в обоих местах
+          echo "flutter.sdk=$FLUTTER_SDK" > local.properties
+          echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
+
+          # Проверяем что наш MainActivity на месте
+          echo "--- MainActivity.kt ---"
+          cat android/app/src/main/kotlin/ru/vktv/app/MainActivity.kt
+
+          # Проверяем манифест на flutterEmbedding
+          echo "--- AndroidManifest ---"
+          grep -A1 "flutterEmbedding" android/app/src/main/AndroidManifest.xml || echo "WARNING: flutterEmbedding not found!"
 
       - name: Get dependencies
         run: flutter pub get
