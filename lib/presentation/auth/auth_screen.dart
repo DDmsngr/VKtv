@@ -1,9 +1,12 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/di/providers.dart';
+import '../../core/security/ad_blocklist.dart';
 
 /// Экран авторизации через встроенный WebView.
 /// После успешного логина перехватываем cookie и сохраняем в VkExtractor.
@@ -50,7 +53,30 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
                 databaseEnabled: true,
+                // Блокировка рекламы на уровне ресурсов.
+                // Требует useShouldInterceptRequest на Android.
+                useShouldInterceptRequest: true,
+                useShouldOverrideUrlLoading: true,
               ),
+              shouldInterceptRequest: (controller, request) async {
+                final uri = request.url;
+                if (AdBlocker.shouldBlockRequest(uri)) {
+                  return WebResourceResponse(
+                    contentType: 'text/plain',
+                    statusCode: 204,
+                    reasonPhrase: 'Blocked',
+                    data: Uint8List(0),
+                  );
+                }
+                return null;
+              },
+              shouldOverrideUrlLoading: (controller, action) async {
+                final uri = action.request.url;
+                if (uri != null && AdBlocker.shouldBlockRequest(uri)) {
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
               onWebViewCreated: (controller) {
                 _webViewController = controller;
               },
@@ -63,6 +89,8 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
               },
               onLoadStop: (controller, url) async {
                 setState(() => _loading = false);
+                // Убираем рекламные блоки на DOM-уровне — CSS + MutationObserver
+                await controller.evaluateJavascript(source: _adHidingJs);
                 await _tryExtractCookies(url?.toString() ?? '');
               },
               onProgressChanged: (controller, progress) {
@@ -161,8 +189,10 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         .map((c) => '${c.name}=${c.value}')
         .join('; ');
 
-    // Сохраняем в экстракторе
+    // Сохраняем в экстракторе и на диск
     ref.read(vkExtractorProvider).setSessionCookie(cookieStr);
+    await ref.read(sessionStoreProvider).saveCookie(cookieStr);
+    ref.read(authStateProvider.notifier).state = true;
 
     setState(() => _status = 'Авторизован!');
 
@@ -173,3 +203,47 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     }
   }
 }
+
+/// JS, который прячет рекламные блоки VK через CSS + MutationObserver.
+/// Повторно срабатывает при динамической подгрузке DOM.
+const String _adHidingJs = r'''
+(function() {
+  if (window.__vktvAdBlockerInjected) return;
+  window.__vktvAdBlockerInjected = true;
+
+  const css = `
+    [data-name="ad_wall"], [data-name="ads_box"],
+    .ads_block, .page_ads_block, .ui_ads_block,
+    #ads_place, #side_ads,
+    .ads_mobile_block, .video_ads_wrap,
+    [id^="ads_"], [class*="adsbygoogle"],
+    .MobileAdsBlock, .ReactAdsBlock,
+    .page_promo_block, .video_box_promo_wrap { 
+      display: none !important; 
+      visibility: hidden !important; 
+      height: 0 !important; 
+      width: 0 !important; 
+    }
+  `;
+  const style = document.createElement('style');
+  style.textContent = css;
+  (document.head || document.documentElement).appendChild(style);
+
+  // Точечное удаление узлов по атрибутам
+  function sweep(root) {
+    const sel = '[data-name="ad_wall"], [data-name="ads_box"], .ads_block, ' +
+                '.page_ads_block, .MobileAdsBlock, .video_ads_wrap, ' +
+                '.page_promo_block, .video_box_promo_wrap';
+    root.querySelectorAll(sel).forEach(el => el.remove());
+  }
+  sweep(document);
+
+  new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const n of m.addedNodes) {
+        if (n.nodeType === 1) sweep(n);
+      }
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true });
+})();
+''';

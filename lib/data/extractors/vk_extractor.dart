@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../../core/security/ad_blocklist.dart';
 
 class VkStreamResult {
   final String url;
@@ -36,6 +37,7 @@ class VkExtractor {
 
   String? _sessionCookie;
   bool get isAuthorized => _sessionCookie != null && _sessionCookie!.isNotEmpty;
+  String? get cookie => _sessionCookie;
 
   /// Вызывается после логина через WebView.
   /// cookies — строка вида "remixsid=xxx; remixdt=yyy; ..."
@@ -157,7 +159,9 @@ class VkExtractor {
     return results;
   }
 
-  /// Рекурсивно ищет ключи hls/url1080/url720 в любом уровне вложенности
+  /// Рекурсивно ищет ключи hls/url1080/url720 в любом уровне вложенности.
+  /// Ветки с рекламными ключами (preroll/midroll/ads/...) пропускаются
+  /// целиком — иначе в плеер улетит ad stream VK.
   void _deepSearchUrls(
     Map<dynamic, dynamic> map,
     List<VkStreamResult> out,
@@ -167,7 +171,11 @@ class VkExtractor {
       out.addAll(extracted);
     } catch (_) {}
 
-    for (final value in map.values) {
+    for (final entry in map.entries) {
+      final key = entry.key.toString();
+      if (AdBlocker.isAdJsonKey(key)) continue; // ad-ветка — игнорируем
+
+      final value = entry.value;
       if (value is Map) {
         _deepSearchUrls(value, out);
       } else if (value is List) {
@@ -238,6 +246,14 @@ class VkExtractor {
   List<VkStreamResult> _parseDirectLinks(String body) {
     final results = <VkStreamResult>[];
 
+    bool isClean(String url) {
+      if (AdBlocker.isAdUrl(url)) return false;
+      final lower = url.toLowerCase();
+      return !lower.contains('/ad_') &&
+          !lower.contains('preroll') &&
+          !lower.contains('/ads/');
+    }
+
     // Используем строковую конкатенацию чтобы избежать проблем с кавычками в regex
     final quote = '"';
     final m3u8Re = RegExp(
@@ -245,6 +261,7 @@ class VkExtractor {
     );
     for (final m in m3u8Re.allMatches(body)) {
       final url = m.group(0)!;
+      if (!isClean(url)) continue;
       if (!results.any((r) => r.url == url)) {
         results.add(VkStreamResult(url: url, quality: 'hls', isHls: true));
       }
@@ -255,6 +272,7 @@ class VkExtractor {
     );
     for (final m in mp4Re.allMatches(body)) {
       final url = m.group(0)!;
+      if (!isClean(url)) continue;
       if (!results.any((r) => r.url == url)) {
         results.add(VkStreamResult(url: url, quality: 'mp4', isHls: false));
       }
@@ -306,12 +324,26 @@ class VkExtractor {
   List<VkStreamResult> _urls(Map<String, dynamic> data) {
     final results = <VkStreamResult>[];
 
-    final hls = data['hls'];
-    if (hls is String && hls.isNotEmpty) {
-      results.add(VkStreamResult(url: hls, quality: 'hls', isHls: true));
+    void addIfClean(String url, String quality, bool isHls) {
+      if (url.isEmpty) return;
+      if (AdBlocker.isAdUrl(url)) return;
+      // Доп. эвристика: VK кладёт преролы на домены типа *.userapi.com/ad_*
+      // или в pathsContain 'preroll' / 'ad_' — отбрасываем.
+      final lower = url.toLowerCase();
+      if (lower.contains('/ad_') ||
+          lower.contains('preroll') ||
+          lower.contains('/ads/')) {
+        return;
+      }
+      results.add(VkStreamResult(url: url, quality: quality, isHls: isHls));
     }
 
+    final hls = data['hls'];
+    if (hls is String) addIfClean(hls, 'hls', true);
+
     const qualityMap = {
+      'url2160': '2160p',
+      'url1440': '1440p',
       'url1080': '1080p',
       'url720': '720p',
       'url480': '480p',
@@ -321,9 +353,7 @@ class VkExtractor {
 
     for (final entry in qualityMap.entries) {
       final v = data[entry.key];
-      if (v is String && v.isNotEmpty) {
-        results.add(VkStreamResult(url: v, quality: entry.value, isHls: false));
-      }
+      if (v is String) addIfClean(v, entry.value, false);
     }
 
     return results;
