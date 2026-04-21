@@ -27,6 +27,19 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Scaffold missing Flutter files
+        run: |
+          flutter create --project-name vk_tv --org ru.vktv /tmp/scaffold
+          cp -rn /tmp/scaffold/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/ 2>/dev/null || true
+          echo "flutter.sdk=$(which flutter | sed 's|/bin/flutter||')" > android/local.properties
+
+      - name: Debug gradle files
+        run: |
+          find . -name "*.gradle" | xargs grep -l "shrinkResources" 2>/dev/null || echo "shrinkResources not found"
+          find . -name "*.gradle" | xargs grep -l "shrink" 2>/dev/null || echo "shrink not found"
+          cat android/app/build.gradle
+          cat android/gradle.properties
+
       - name: Get dependencies
         run: flutter pub get
 
@@ -43,11 +56,3 @@ jobs:
           name: vk-tv-debug
           path: build/app/outputs/apk/debug/app-debug.apk
           retention-days: 14
-
-      - name: Create Release on tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/app/outputs/apk/debug/app-debug.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
