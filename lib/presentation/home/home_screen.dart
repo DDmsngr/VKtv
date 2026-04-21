@@ -262,13 +262,16 @@ class _TopBar extends StatelessWidget {
       color: const Color(0xFF1A1A2E),
       child: Row(
         children: [
-          const Text(
-            'VK TV',
-            style: TextStyle(
-              color: Color(0xFF5181B8),
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1,
+          GestureDetector(
+            onLongPress: () => context.push('/debug'),
+            child: const Text(
+              'VK TV',
+              style: TextStyle(
+                color: Color(0xFF5181B8),
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1,
+              ),
             ),
           ),
           const SizedBox(width: 32),
