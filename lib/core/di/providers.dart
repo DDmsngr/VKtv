@@ -1,4 +1,6 @@
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../data/extractors/vk_extractor.dart';
 import '../../data/repositories/video_repository_impl.dart';
 import '../../data/sources/session_store.dart';
@@ -12,8 +14,7 @@ final sessionStoreProvider = Provider<SessionStore>((ref) {
   );
 });
 
-/// Реактивное состояние авторизации — меняется после login/logout,
-/// чтобы UI мог перерисовываться.
+/// Реактивное состояние авторизации.
 final authStateProvider = StateProvider<bool>((ref) {
   return ref.watch(sessionStoreProvider).cookie?.isNotEmpty ?? false;
 });
@@ -29,10 +30,9 @@ final vkExtractorProvider = Provider<VkExtractor>((ref) {
 });
 
 final vkFeedScraperProvider = Provider<VkFeedScraper>((ref) {
-  final extractor = ref.watch(vkExtractorProvider);
-  // Лениво отдаём актуальную cookie — она может смениться
-  // после login/logout без пересоздания скрейпера.
-  return VkFeedScraper(cookieProvider: () => extractor.cookie);
+  final scraper = VkFeedScraper();
+  ref.onDispose(() => scraper.dispose());
+  return scraper;
 });
 
 final videoRepositoryProvider = Provider<IVideoRepository>((ref) {
@@ -42,12 +42,20 @@ final videoRepositoryProvider = Provider<IVideoRepository>((ref) {
   );
 });
 
-/// Выход из аккаунта — чистим extractor + SessionStore и дёргаем authState.
+/// Выход из аккаунта — чистим всё: VK-cookie из Chromium, extractor,
+/// SessionStore, и пересоздаём scraper (чтобы Chromium тоже пересоздался).
 final logoutActionProvider = Provider<Future<void> Function()>((ref) {
   return () async {
+    try {
+      await CookieManager.instance().deleteAllCookies();
+    } catch (_) {
+      // На некоторых устройствах deleteAllCookies может кидать —
+      // не критично, перекроется при следующем логине.
+    }
     ref.read(vkExtractorProvider).clearSession();
     await ref.read(sessionStoreProvider).clear();
     ref.read(authStateProvider.notifier).state = false;
+    ref.invalidate(vkFeedScraperProvider);
     ref.invalidate(videoRepositoryProvider);
   };
 });
