@@ -62,7 +62,10 @@ jobs:
           cat android/app/src/main/kotlin/ru/vktv/app/MainActivity.kt
 
       - name: Flutter pub get
-        run: flutter pub get
+        run: |
+          # Удаляем lock чтобы dependency_overrides подхватились гарантированно
+          rm -f pubspec.lock
+          flutter pub get
 
       - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos
