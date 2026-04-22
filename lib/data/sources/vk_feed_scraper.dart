@@ -1,5 +1,7 @@
+// lib/data/sources/vk_feed_scraper.dart
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/security/ad_blocklist.dart';
@@ -54,6 +56,7 @@ class VkFeedScraper {
   HeadlessInAppWebView? _webView;
   InAppWebViewController? _controller;
   Completer<void>? _loadCompleter;
+  int _loadToken = 0;
 
   ScraperDebugSnapshot lastSnapshot = ScraperDebugSnapshot.empty();
 
@@ -65,7 +68,6 @@ class VkFeedScraper {
   Future<void> _ensureWebView() async {
     if (_webView != null && _controller != null) return;
 
-    final c = Completer<void>();
     _webView = HeadlessInAppWebView(
       initialUrlRequest: URLRequest(url: WebUri('about:blank')),
       initialSettings: InAppWebViewSettings(
@@ -91,23 +93,19 @@ class VkFeedScraper {
         _controller = controller;
       },
       onLoadStop: (controller, url) {
-        _loadCompleter?.complete();
+        _completeLoad();
       },
       onReceivedError: (controller, request, error) {
         // Ошибки подресурсов (картинки, xhr, заблокированная реклама) игнорируем.
         // Реагируем только на main frame.
         if (request.isForMainFrame != true) return;
-        if (_loadCompleter != null && !_loadCompleter!.isCompleted) {
-          _loadCompleter!.completeError('WebView error: ${error.description}');
-        }
+        _failLoad('WebView error: ${error.description}');
       },
       onReceivedHttpError: (controller, request, errorResponse) {
         if (request.isForMainFrame != true) return;
-        if (_loadCompleter != null && !_loadCompleter!.isCompleted) {
-          _loadCompleter!.completeError(
-            'HTTP ${errorResponse.statusCode}: ${errorResponse.reasonPhrase ?? "?"}',
-          );
-        }
+        _failLoad(
+          'HTTP ${errorResponse.statusCode}: ${errorResponse.reasonPhrase ?? "?"}',
+        );
       },
     );
 
@@ -123,7 +121,6 @@ class VkFeedScraper {
     if (_controller == null) {
       throw Exception('Не удалось инициализировать WebView');
     }
-    c.complete();
   }
 
   /// Загружает страницу и возвращает её outerHTML.
@@ -132,13 +129,14 @@ class VkFeedScraper {
   Future<String> _fetchHtml(String url, {String? waitForSelector}) async {
     await _ensureWebView();
     final ctrl = _controller!;
+    final token = ++_loadToken;
 
     _loadCompleter = Completer<void>();
     await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
     // Ждём onLoadStop с таймаутом 20 сек.
     try {
-      await _loadCompleter!.future.timeout(const Duration(seconds: 20));
+      await _awaitLoadOrStale(token).timeout(const Duration(seconds: 20));
     } on TimeoutException {
       throw Exception('Timeout загрузки $url');
     }
@@ -264,12 +262,13 @@ class VkFeedScraper {
   }) async {
     await _ensureWebView();
     final ctrl = _controller!;
+    final token = ++_loadToken;
 
     _loadCompleter = Completer<void>();
     await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
     try {
-      await _loadCompleter!.future.timeout(const Duration(seconds: 25));
+      await _awaitLoadOrStale(token).timeout(const Duration(seconds: 25));
     } on TimeoutException {
       // Продолжаем — плеер мог частично загрузиться
     }
@@ -512,10 +511,10 @@ class VkFeedScraper {
     final out = <VideoEntity>[];
     final seen = <String>{};
     final linkRe = RegExp(
-      r'<a[^>]+href="(https?://[^"]*/video(-?\d+_\d+)[^"]*)"[^>]*>',
+      r'<a[^>]+href="((?:https?://[^"]*)?/video(-?\d+_\d+)[^"]*)"[^>]*>',
     );
     for (final m in linkRe.allMatches(html)) {
-      final href = m.group(1)!;
+      final href = _resolveVkVideoUrl(m.group(1)!);
       final id = m.group(2)!;
       if (seen.contains(id)) continue;
       seen.add(id);
@@ -588,4 +587,36 @@ class VkFeedScraper {
         .replaceAll('&nbsp;', ' ')
         .trim();
   }
+
+  Future<void> _awaitLoadOrStale(int token) async {
+    final completer = _loadCompleter;
+    if (completer == null) return;
+    await completer.future;
+    if (token != _loadToken) return;
+  }
+
+  void _completeLoad() {
+    final completer = _loadCompleter;
+    if (completer == null || completer.isCompleted) return;
+    completer.complete();
+  }
+
+  void _failLoad(String message) {
+    final completer = _loadCompleter;
+    if (completer == null || completer.isCompleted) return;
+    completer.completeError(message);
+  }
+
+  String _resolveVkVideoUrl(String href) {
+    if (href.startsWith('http')) return href;
+    if (href.startsWith('//')) return 'https:$href';
+    if (href.startsWith('/')) return 'https://vkvideo.ru$href';
+    return 'https://vkvideo.ru/$href';
+  }
+
+  @visibleForTesting
+  List<VideoEntity> parseCardsForTest(String html) => _parseCards(html);
+
+  @visibleForTesting
+  String resolveVkVideoUrlForTest(String href) => _resolveVkVideoUrl(href);
 }
