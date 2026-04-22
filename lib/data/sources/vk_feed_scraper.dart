@@ -296,9 +296,14 @@ class VkFeedScraper {
   }
 
   function stripBytes(u) {
-    // Убираем &bytes=X-Y — это range-запрос, нам нужен базовый URL
-    var noBytes = u.split(/[&?]bytes=[0-9]+-[0-9]+/)[0];
-    return noBytes.replace(/[?&]$/, '').replace(/&&/g, '&');
+    // Убираем &bytes=X-Y без regex (Dart парсит [] внутри """ строк)
+    var idx = u.indexOf('&bytes=');
+    if (idx === -1) idx = u.indexOf('?bytes=');
+    if (idx !== -1) u = u.substring(0, idx);
+    if (u.charAt(u.length - 1) === '?' || u.charAt(u.length - 1) === '&') {
+      u = u.substring(0, u.length - 1);
+    }
+    return u;
   }
 
   // Патчим fetch
