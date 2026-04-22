@@ -40,6 +40,43 @@ class VkExtractor {
     _sessionCookie = null;
   }
 
+  /// Диагностический метод: возвращает сырые captured URL + распарсенные результаты.
+  /// Используется только в DebugScreen.
+  Future<Map<String, dynamic>> extractDebug(String pageUrl) async {
+    final videoId = _parseVideoId(pageUrl);
+    if (videoId == null) {
+      return {'error': 'Не удалось распознать video ID: $pageUrl', 'captured': [], 'parsed': []};
+    }
+    final normalizedUrl = 'https://vkvideo.ru/video$videoId';
+    try {
+      final html = await _scraper.fetchPageForExtractor(normalizedUrl);
+
+      // Вытаскиваем captured из VKTV_STREAMS комментария
+      final marker = RegExp(r'<!--\s*VKTV_STREAMS:\s*(\[.*?\])\s*-->', dotAll: true);
+      final m = marker.firstMatch(html);
+      final capturedRaw = m?.group(1) ?? '[]';
+
+      // Парсим результаты
+      List<String> parsed = [];
+      for (final parser in [_parseViaJsEval, _parsePlayerParamsFromHtml, _parseDirectLinksFromHtml]) {
+        final results = parser(html);
+        if (results.isNotEmpty) {
+          parsed = results.map((r) => '${r.quality}: ${r.url}').toList();
+          break;
+        }
+      }
+
+      return {
+        'error': '',
+        'captured_raw': capturedRaw,
+        'parsed': parsed,
+        'html_length': html.length,
+      };
+    } catch (e) {
+      return {'error': e.toString(), 'captured': [], 'parsed': []};
+    }
+  }
+
   Future<List<VkStreamResult>> extract(String pageUrl) async {
     final videoId = _parseVideoId(pageUrl);
     if (videoId == null) {
