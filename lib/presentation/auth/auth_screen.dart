@@ -1,3 +1,4 @@
+// lib/presentation/auth/auth_screen.dart
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -19,6 +20,7 @@ class AuthScreen extends ConsumerStatefulWidget {
 
 class _AuthScreenState extends ConsumerState<AuthScreen> {
   InAppWebViewController? _webViewController;
+  late final FocusNode _keyboardFocusNode;
   bool _loading = true;
   String _status = 'Загрузка...';
 
@@ -26,16 +28,28 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   static const _successUrls = ['vk.com/feed', 'vk.com/video', 'vkvideo.ru'];
 
   @override
+  void initState() {
+    super.initState();
+    _keyboardFocusNode = FocusNode(debugLabel: 'auth_keyboard_listener');
+  }
+
+  @override
+  void dispose() {
+    _keyboardFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
       body: KeyboardListener(
         autofocus: true,
-        focusNode: FocusNode(),
+        focusNode: _keyboardFocusNode,
         onKeyEvent: (event) {
           if (event is KeyDownEvent &&
               (event.logicalKey == LogicalKeyboardKey.escape ||
-               event.logicalKey == LogicalKeyboardKey.goBack)) {
+                  event.logicalKey == LogicalKeyboardKey.goBack)) {
             context.pop();
           }
         },
@@ -46,8 +60,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                 url: WebUri(_loginUrl),
               ),
               initialSettings: InAppWebViewSettings(
-                userAgent:
-                    'Mozilla/5.0 (X11; Linux x86_64) '
+                userAgent: 'Mozilla/5.0 (X11; Linux x86_64) '
                     'AppleWebKit/537.36 (KHTML, like Gecko) '
                     'Chrome/120.0.0.0 Safari/537.36',
                 javaScriptEnabled: true,
@@ -185,9 +198,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     if (sessionCookies.isEmpty) return;
 
     // Собираем строку cookie
-    final cookieStr = cookies
-        .map((c) => '${c.name}=${c.value}')
-        .join('; ');
+    final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
 
     // Сохраняем в экстракторе и на диск
     ref.read(vkExtractorProvider).setSessionCookie(cookieStr);
