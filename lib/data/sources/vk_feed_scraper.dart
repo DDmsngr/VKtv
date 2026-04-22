@@ -256,13 +256,15 @@ class VkFeedScraper {
   /// URL потоков прямо в DOM/window и вставляет их как комментарий
   /// <!-- VKTV_STREAMS: [...] --> в конец HTML. Так extractor не нужен
   /// доступ к InAppWebViewController напрямую.
-  /// Загружает страницу видео для VkExtractor и извлекает URL потока через JS.
+  /// Загружает страницу видео и перехватывает URL потока через fetch/XHR interceptor.
   ///
-  /// Стратегия по приоритету:
-  ///   1. window.__remixSettings - содержит все качества без рекламы
-  ///   2. window.vkvideo_player_config / playerConfig
-  ///   3. video.src с type=7 (основной контент, не preroll type=5)
-  ///   4. okcdn/vkuser URL из script-тегов (фильтр рекламы)
+  /// VK Video использует MediaSource Extensions (MSE) + Shadow DOM: URL видео
+  /// никогда не появляется в <video src> или DOM атрибутах. Плеер качает
+  /// сегменты через fetch() внутри своего бандла.
+  ///
+  /// Решение: инжектируем userScript ПЕРЕД загрузкой страницы. Он патчит
+  /// window.fetch и XMLHttpRequest, перехватывая все запросы к okcdn/vkuser
+  /// и сохраняя их в window.__vktv_captured[]. После загрузки читаем массив.
   Future<String> fetchPageForExtractor(
     String url, {
     String? waitForSelector,
@@ -271,102 +273,90 @@ class VkFeedScraper {
     final ctrl = _controller!;
     final token = ++_loadToken;
 
+    // Инжектируем перехватчик ПЕРЕД loadUrl чтобы он поймал первые запросы
+    const interceptorScript = """
+(function() {
+  if (window.__vktv_patched) return;
+  window.__vktv_patched = true;
+  window.__vktv_captured = [];
+
+  function isTarget(u) {
+    if (!u || typeof u !== 'string') return false;
+    var lower = u.toLowerCase();
+    // Только основной контент (type=7), не preroll (type=5)
+    if (lower.indexOf('type=5') !== -1) return false;
+    if (lower.indexOf('/ad_') !== -1) return false;
+    if (lower.indexOf('preroll') !== -1) return false;
+    return lower.indexOf('okcdn') !== -1 || lower.indexOf('vkuser') !== -1;
+  }
+
+  // Патчим fetch
+  var origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    var u = typeof input === 'string' ? input : (input && input.url) || '';
+    if (isTarget(u) && window.__vktv_captured.indexOf(u) === -1) {
+      window.__vktv_captured.push(u);
+    }
+    return origFetch.apply(this, arguments);
+  };
+
+  // Патчим XHR
+  var origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    if (isTarget(url) && window.__vktv_captured.indexOf(url) === -1) {
+      window.__vktv_captured.push(url);
+    }
+    return origOpen.apply(this, arguments);
+  };
+})();
+""";
+
+    await ctrl.addUserScript(
+      userScript: UserScript(
+        source: interceptorScript,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      ),
+    );
+
     _loadCompleter = Completer<void>();
     await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
     try {
       await _awaitLoadOrStale(token).timeout(const Duration(seconds: 20));
     } on TimeoutException {
-      // Продолжаем если страница не отправила onLoadStop
+      // Продолжаем
     } catch (_) {}
 
-    // Единый polling: ждём URL основного контента (не preroll).
-    // Максимум 12 сек (24 * 500мс).
+    // Polling: ждём появления captured URL (макс 12 сек)
     String streamsJson = '[]';
-    const maxAttempts = 24;
-    for (var i = 0; i < maxAttempts; i++) {
+    for (var i = 0; i < 24; i++) {
       await Future.delayed(const Duration(milliseconds: 500));
-
-      final result = await ctrl.evaluateJavascript(source: r"""
+      final result = await ctrl.evaluateJavascript(source: """
 (function() {
-  var urls = [];
-
-  function isContent(u) {
-    if (!u || typeof u !== 'string') return false;
-    if (!u.startsWith('http')) return false;
-    if (u.indexOf('blob:') !== -1) return false;
-    var lower = u.toLowerCase();
-    if (lower.indexOf('type=5') !== -1) return false;
-    if (lower.indexOf('/ad_') !== -1) return false;
-    if (lower.indexOf('preroll') !== -1) return false;
-    if (lower.indexOf('advert') !== -1) return false;
-    return u.indexOf('okcdn') !== -1 || u.indexOf('vkuser') !== -1 ||
-           u.indexOf('.m3u8') !== -1;
-  }
-
-  try {
-    var rs = window.__remixSettings;
-    if (rs) {
-      var s = typeof rs === 'string' ? rs : JSON.stringify(rs);
-      var m = s.match(/https?:\/\/[^"'\]+(?:okcdn|vkuser|\.m3u8)[^"'\]*/g);
-      if (m) m.forEach(function(u) { if (isContent(u)) urls.push(u); });
-    }
-  } catch(e) {}
-
-  ['vkvideo_player_config', 'playerConfig', 'vkplayer'].forEach(function(key) {
-    try {
-      var obj = window[key];
-      if (!obj) return;
-      var s = typeof obj === 'string' ? obj : JSON.stringify(obj);
-      var m = s.match(/https?:\/\/[^"'\]+(?:okcdn|vkuser|\.m3u8)[^"'\]*/g);
-      if (m) m.forEach(function(u) { if (isContent(u)) urls.push(u); });
-    } catch(e) {}
-  });
-
-  document.querySelectorAll('video[src]').forEach(function(v) {
-    var src = v.src;
-    if (!isContent(src)) return;
-    var typeMatch = src.match(/[?&]type=(\d+)/);
-    if (!typeMatch || typeMatch[1] === '7') {
-      urls.push(src);
-    }
-  });
-
-  if (urls.length === 0) {
-    document.querySelectorAll('script').forEach(function(sc) {
-      var t = sc.textContent || '';
-      if (t.indexOf('okcdn') === -1 && t.indexOf('vkuser') === -1) return;
-      var m = t.match(/"(https?:\/\/[^"]*(?:okcdn|vkuser)[^"]*)"/g);
-      if (m) m.forEach(function(raw) {
-        var u = raw.replace(/^"|"$/g, '');
-        if (isContent(u)) urls.push(u);
-      });
-    });
-  }
-
-  if (urls.length === 0) return null;
-
-  var seen = {};
-  var result = [];
-  urls.forEach(function(u) {
-    if (!seen[u]) { seen[u] = true; result.push(u); }
-  });
-  return JSON.stringify(result);
+  var captured = window.__vktv_captured;
+  if (!captured || captured.length === 0) return null;
+  return JSON.stringify(captured);
 })()
 """);
-
       if (result != null && result != 'null' && result is String && result != '[]') {
         streamsJson = result;
         break;
       }
     }
 
+    // Убираем userScript чтобы не мешал следующим загрузкам (лента и т.д.)
+    await ctrl.removeAllUserScripts();
+    // Сбрасываем флаг патча для следующего вызова
+    await ctrl.evaluateJavascript(
+      source: 'window.__vktv_patched = false; window.__vktv_captured = [];',
+    );
+
     final html = await ctrl.evaluateJavascript(
       source: 'document.documentElement.outerHTML',
     );
     final htmlStr = html is String ? html : '';
 
-    return '$htmlStr\n<!-- VKTV_STREAMS: $streamsJson -->';
+    return '\$htmlStr\n<!-- VKTV_STREAMS: \$streamsJson -->';
   }
 
 
