@@ -1,3 +1,4 @@
+// lib/presentation/player/player_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -23,6 +24,7 @@ class PlayerScreen extends ConsumerStatefulWidget {
 class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   late final Player _player;
   late final VideoController _controller;
+  late final FocusNode _keyboardFocusNode;
   bool _showControls = true;
   bool _loading = true;
 
@@ -31,6 +33,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     super.initState();
     _player = Player();
     _controller = VideoController(_player);
+    _keyboardFocusNode = FocusNode(debugLabel: 'player_keyboard_listener');
     _startPlayback();
   }
 
@@ -43,8 +46,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     String streamUrl = url;
     if (!isDirectStream) {
       try {
-        streamUrl = await ref
-            .read(streamUrlProvider(url).future);
+        streamUrl = await ref.read(streamUrlProvider(url).future);
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -66,6 +68,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   @override
   void dispose() {
+    _keyboardFocusNode.dispose();
     _player.dispose();
     super.dispose();
   }
@@ -92,7 +95,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       backgroundColor: Colors.black,
       body: KeyboardListener(
         autofocus: true,
-        focusNode: FocusNode(),
+        focusNode: _keyboardFocusNode,
         onKeyEvent: (event) {
           if (event is! KeyDownEvent) return;
           _showControlsTemporarily();
@@ -101,15 +104,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             case LogicalKeyboardKey.select:
             case LogicalKeyboardKey.mediaPlayPause:
               _togglePlayPause();
+              return;
             case LogicalKeyboardKey.arrowLeft:
             case LogicalKeyboardKey.mediaRewind:
               _seekBy(const Duration(seconds: -10));
+              return;
             case LogicalKeyboardKey.arrowRight:
             case LogicalKeyboardKey.mediaFastForward:
               _seekBy(const Duration(seconds: 10));
+              return;
             case LogicalKeyboardKey.escape:
             case LogicalKeyboardKey.goBack:
               context.pop();
+              return;
+            default:
+              return;
           }
         },
         child: Stack(
@@ -181,14 +190,18 @@ class _ControlsOverlay extends StatelessWidget {
             child: Row(
               children: [
                 IconButton(
-                  icon: const Icon(Icons.arrow_back, color: Colors.white, size: 28),
+                  icon:
+                      const Icon(Icons.arrow_back, color: Colors.white, size: 28),
                   onPressed: onBack,
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Text(
                     title,
-                    style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -214,7 +227,8 @@ class _ControlsOverlay extends StatelessWidget {
                     LinearProgressIndicator(
                       value: progress.clamp(0.0, 1.0),
                       backgroundColor: Colors.white24,
-                      valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF5181B8)),
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                          Color(0xFF5181B8)),
                       minHeight: 4,
                     ),
                     const SizedBox(height: 12),
@@ -222,12 +236,14 @@ class _ControlsOverlay extends StatelessWidget {
                       children: [
                         Text(
                           _fmt(pos),
-                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 13),
                         ),
                         const Spacer(),
                         Text(
                           _fmt(dur),
-                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 13),
                         ),
                       ],
                     ),
@@ -237,7 +253,8 @@ class _ControlsOverlay extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.replay_10, color: Colors.white, size: 36),
+                          icon: const Icon(Icons.replay_10,
+                              color: Colors.white, size: 36),
                           onPressed: onSeekBack,
                         ),
                         const SizedBox(width: 24),
@@ -245,7 +262,9 @@ class _ControlsOverlay extends StatelessWidget {
                           stream: player.stream.playing,
                           builder: (_, snap) => IconButton(
                             icon: Icon(
-                              (snap.data ?? false) ? Icons.pause : Icons.play_arrow,
+                              (snap.data ?? false)
+                                  ? Icons.pause
+                                  : Icons.play_arrow,
                               color: Colors.white,
                               size: 48,
                             ),
@@ -254,7 +273,8 @@ class _ControlsOverlay extends StatelessWidget {
                         ),
                         const SizedBox(width: 24),
                         IconButton(
-                          icon: const Icon(Icons.forward_10, color: Colors.white, size: 36),
+                          icon: const Icon(Icons.forward_10,
+                              color: Colors.white, size: 36),
                           onPressed: onSeekForward,
                         ),
                       ],
