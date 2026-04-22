@@ -293,60 +293,73 @@ class VkFeedScraper {
       await Future.delayed(const Duration(milliseconds: 2000));
     }
 
-    // JS-скрипт: вытаскиваем потоки из всех известных источников
+    // Polling: ждём пока video.src заполнится реальным okcdn/vkuser URL.
+    // VK Video отдаёт прямой MP4 (не HLS), src устанавливается асинхронно.
+    for (var i = 0; i < 20; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      final hasSrc = await ctrl.evaluateJavascript(source: """
+(function() {
+  var v = document.querySelector('video[src]');
+  if (v && (v.src.indexOf('okcdn') !== -1 || v.src.indexOf('vkuser') !== -1)) return true;
+  var s = document.querySelector('source[src]');
+  if (s && (s.src.indexOf('okcdn') !== -1 || s.src.indexOf('vkuser') !== -1)) return true;
+  return false;
+})()
+""");
+      if (hasSrc == true || hasSrc == 'true') break;
+    }
+
+    // JS-скрипт: вытаскиваем потоки из всех источников.
+    // VK Video (vkvideo.ru) отдаёт прямые MP4 на okcdn.ru и vkuser.net.
     final streamsJson = await ctrl.evaluateJavascript(source: r"""
 (function() {
   var urls = [];
 
-  // 1. Прямой src у <video>
-  var video = document.querySelector('video');
-  if (video && video.src && video.src.startsWith('http') && video.src.indexOf('blob:') === -1) {
-    urls.push(video.src);
+  function isVideoUrl(u) {
+    return u && typeof u === 'string' && u.startsWith('http') &&
+      u.indexOf('blob:') === -1 &&
+      (u.indexOf('okcdn') !== -1 || u.indexOf('vkuser') !== -1 ||
+       u.indexOf('.mp4') !== -1 || u.indexOf('.m3u8') !== -1);
   }
 
-  // 2. <source src> внутри <video>
-  var sources = document.querySelectorAll('source[src]');
-  sources.forEach(function(s) {
-    if (s.src && s.src.startsWith('http') && s.src.indexOf('blob:') === -1) {
-      urls.push(s.src);
-    }
+  // 1. src у <video>
+  document.querySelectorAll('video').forEach(function(v) {
+    if (isVideoUrl(v.src)) urls.push(v.src);
   });
 
-  // 3. window.__DATA__ — VK кладёт сюда параметры плеера
-  try {
-    if (window.__DATA__) {
-      var d = JSON.stringify(window.__DATA__);
-      var matches = d.match(/https?:[^"'\\\\]+\.(m3u8|mp4)[^"'\\\\]*/g);
-      if (matches) matches.forEach(function(u) { urls.push(u); });
-    }
-  } catch(e) {}
+  // 2. <source src>
+  document.querySelectorAll('source[src]').forEach(function(s) {
+    if (isVideoUrl(s.src)) urls.push(s.src);
+  });
 
-  // 4. window.playerParams
-  try {
-    if (window.playerParams) {
-      var p = typeof window.playerParams === 'string'
-        ? JSON.parse(window.playerParams)
-        : window.playerParams;
-      ['hls','url2160','url1440','url1080','url720','url480','url360','url240'].forEach(function(k) {
-        if (p[k] && typeof p[k] === 'string') urls.push(p[k]);
-        if (p.params && p.params[0] && p.params[0][k]) urls.push(p.params[0][k]);
-      });
-    }
-  } catch(e) {}
+  // 3. В script тегах
+  document.querySelectorAll('script').forEach(function(sc) {
+    var t = sc.textContent || '';
+    if (t.indexOf('okcdn') === -1 && t.indexOf('vkuser') === -1) return;
+    var m = t.match(/"(https?:\/\/[^"]*(?:okcdn|vkuser)[^"]*)"/g);
+    if (m) m.forEach(function(raw) {
+      var u = raw.replace(/^"|"$/g, '');
+      if (isVideoUrl(u)) urls.push(u);
+    });
+  });
 
-  // 5. Ищем mp4/m3u8 ключи в window.vk
-  try {
-    var vk = window.vk || {};
-    var s = JSON.stringify(vk);
-    var matches = s.match(/https?:[^"'\\\\]+\.(m3u8|mp4)[^"'\\\\]*/g);
-    if (matches) matches.forEach(function(u) { urls.push(u); });
-  } catch(e) {}
+  // 4. window.__DATA__ / window.playerParams
+  ['__DATA__', 'playerParams'].forEach(function(key) {
+    try {
+      var obj = window[key];
+      if (!obj) return;
+      var s = typeof obj === 'string' ? obj : JSON.stringify(obj);
+      var m = s.match(/https?:\/\/[^"'\\\\]+(?:okcdn|vkuser|\.m3u8|\.mp4)[^"'\\\\]*/g);
+      if (m) m.forEach(function(u) { if (isVideoUrl(u)) urls.push(u); });
+    } catch(e) {}
+  });
 
   // Дедуп и фильтр рекламы
   var seen = {};
   var clean = [];
   urls.forEach(function(u) {
-    if (!seen[u] && u.indexOf('/ad_') === -1 && u.indexOf('preroll') === -1) {
+    var lower = u.toLowerCase();
+    if (!seen[u] && lower.indexOf('/ad_') === -1 && lower.indexOf('preroll') === -1) {
       seen[u] = true;
       clean.push(u);
     }
