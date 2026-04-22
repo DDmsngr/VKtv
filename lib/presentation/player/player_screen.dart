@@ -7,6 +7,9 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:go_router/go_router.dart';
 import 'player_provider.dart';
 
+// ignore: depend_on_referenced_packages
+import 'package:media_kit/media_kit.dart' show PlayerConfiguration;
+
 class PlayerScreen extends ConsumerStatefulWidget {
   final String videoUrl;
   final String title;
@@ -31,8 +34,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    _controller = VideoController(_player);
+    _player = Player(
+      configuration: const PlayerConfiguration(
+        // Логировать ошибки libmpv
+        logLevel: MPVLogLevel.error,
+      ),
+    );
+    _controller = VideoController(
+      _player,
+      configuration: const VideoControllerConfiguration(
+        // AndroidSurfaceProducer.image решает чёрный экран на Android/LDPlayer
+        androidAttachSurfaceAfterVideoParameters: false,
+      ),
+    );
     _keyboardFocusNode = FocusNode(debugLabel: 'player_keyboard_listener');
     _startPlayback();
   }
@@ -41,7 +55,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // Если прямая ссылка — сразу открываем
     // Если страница VK — резолвим через экстрактор
     final url = widget.videoUrl;
-    final isDirectStream = url.contains('.m3u8') || url.contains('.mp4');
+    final isDirectStream = url.contains('.m3u8') || url.contains('.mp4') || url.contains('okcdn') || url.contains('vkuser');
 
     String streamUrl = url;
     if (!isDirectStream) {
@@ -69,7 +83,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   @override
   void dispose() {
     _keyboardFocusNode.dispose();
-    _player.dispose();
+    // Останавливаем воспроизведение ПЕРЕД dispose — иначе аудио продолжает играть
+    // пока GC не соберёт объект. Критично для Android.
+    _player.stop().then((_) => _player.dispose());
     super.dispose();
   }
 
