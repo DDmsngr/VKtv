@@ -197,7 +197,8 @@ class VkExtractor {
       final lower = url.toLowerCase();
       if (lower.contains('.m3u8')) {
         results.add(VkStreamResult(url: url, quality: 'hls', isHls: true));
-      } else if (lower.contains('.mp4')) {
+      } else {
+        // VK Video отдаёт MP4 на okcdn.ru/vkuser.net без расширения в URL
         results.add(VkStreamResult(url: url, quality: 'mp4', isHls: false));
       }
     }
