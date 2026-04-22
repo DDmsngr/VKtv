@@ -98,20 +98,20 @@ class _DebugScreenState extends ConsumerState<DebugScreen> {
                             _extractorResult = '';
                           });
                           try {
-                            final result = await extractor.extractDebug(
+                            final debugResult = await extractor.extractDebug(
                               _videoUrlController.text.trim(),
                             );
                             setState(() {
                               _extractorResult =
-                                  'captured_raw: \${result['captured_raw']}\n\n'
-                                  'parsed: \${result['parsed']}\n\n'
-                                  'html_length: \${result['html_length']}\n\n'
-                                  'error: \${result['error']}';
+                                  'captured_raw: ${debugResult['captured_raw']}\n\n'
+                                  'parsed: ${debugResult['parsed']}\n\n'
+                                  'html_length: ${debugResult['html_length']}\n\n'
+                                  'error: ${debugResult['error']}';
                               _status = 'Экстрактор — готово';
                             });
                           } catch (e) {
                             setState(() {
-                              _extractorResult = 'Exception: \$e';
+                              _extractorResult = 'Exception: $e';
                               _status = 'Экстрактор — ошибка';
                             });
                           } finally {
