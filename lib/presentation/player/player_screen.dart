@@ -41,8 +41,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _controller = VideoController(
       _player,
       configuration: const VideoControllerConfiguration(
-        // AndroidSurfaceProducer.image решает чёрный экран на Android/LDPlayer
-        androidAttachSurfaceAfterVideoParameters: false,
+        // На LDPlayer (эмулятор) нет аппаратного декодирования GPU.
+        // enableHardwareAcceleration: false заставляет libmpv использовать
+        // программный рендеринг, который работает везде.
+        enableHardwareAcceleration: false,
       ),
     );
     _keyboardFocusNode = FocusNode(debugLabel: 'player_keyboard_listener');
@@ -70,6 +72,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
 
     await _player.open(Media(streamUrl));
+    // Даём Surface время присоединиться к декодеру (критично на LDPlayer)
+    await Future.delayed(const Duration(milliseconds: 500));
     if (mounted) setState(() => _loading = false);
 
     // Автоскрытие контролов через 3 секунды
