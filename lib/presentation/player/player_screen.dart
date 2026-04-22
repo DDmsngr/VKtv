@@ -7,8 +7,6 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:go_router/go_router.dart';
 import 'player_provider.dart';
 
-// ignore: depend_on_referenced_packages
-import 'package:media_kit/media_kit.dart' show PlayerConfiguration;
 
 class PlayerScreen extends ConsumerStatefulWidget {
   final String videoUrl;
@@ -43,12 +41,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _controller = VideoController(
       _player,
       configuration: const VideoControllerConfiguration(
-        // false = Surface присоединяется ДО получения параметров видео.
-        // Решает чёрный экран на Android/LDPlayer где Surface создаётся медленно.
+        // AndroidSurfaceProducer.image решает чёрный экран на Android/LDPlayer
         androidAttachSurfaceAfterVideoParameters: false,
-        // Отключаем HW-ускорение как fallback для эмуляторов (LDPlayer).
-        // На реальных устройствах можно включить обратно.
-        enableHardwareAcceleration: false,
       ),
     );
     _keyboardFocusNode = FocusNode(debugLabel: 'player_keyboard_listener');
@@ -75,10 +69,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       }
     }
 
-    // Пауза 300мс: даём VideoController зарегистрировать Surface
-    // в Android TextureRegistry перед стартом декодирования.
-    // Без этого на LDPlayer первые кадры теряются -> чёрный экран.
-    await Future.delayed(const Duration(milliseconds: 300));
     await _player.open(Media(streamUrl));
     if (mounted) setState(() => _loading = false);
 
