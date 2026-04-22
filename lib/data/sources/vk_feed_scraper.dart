@@ -297,7 +297,8 @@ class VkFeedScraper {
 
   function stripBytes(u) {
     // Убираем &bytes=X-Y — это range-запрос, нам нужен базовый URL
-    return u.replace(/[&?]bytes=[0-9]+-[0-9]*/g, '').replace(/&&/g, '&').replace(/[?&]$/, '');
+    var noBytes = u.split(/[&?]bytes=[0-9]+-[0-9]+/)[0];
+    return noBytes.replace(/[?&]$/, '').replace(/&&/g, '&');
   }
 
   // Патчим fetch
