@@ -256,6 +256,13 @@ class VkFeedScraper {
   /// URL потоков прямо в DOM/window и вставляет их как комментарий
   /// <!-- VKTV_STREAMS: [...] --> в конец HTML. Так extractor не нужен
   /// доступ к InAppWebViewController напрямую.
+  /// Загружает страницу видео для VkExtractor и извлекает URL потока через JS.
+  ///
+  /// Стратегия по приоритету:
+  ///   1. window.__remixSettings - содержит все качества без рекламы
+  ///   2. window.vkvideo_player_config / playerConfig
+  ///   3. video.src с type=7 (основной контент, не preroll type=5)
+  ///   4. okcdn/vkuser URL из script-тегов (фильтр рекламы)
   Future<String> fetchPageForExtractor(
     String url, {
     String? waitForSelector,
@@ -268,116 +275,100 @@ class VkFeedScraper {
     await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
     try {
-      await _awaitLoadOrStale(token).timeout(const Duration(seconds: 25));
+      await _awaitLoadOrStale(token).timeout(const Duration(seconds: 20));
     } on TimeoutException {
-      // Продолжаем — плеер мог частично загрузиться
-    }
+      // Продолжаем если страница не отправила onLoadStop
+    } catch (_) {}
 
-    // Ждём появления <video> или <source src> — плеер инициализирован
-    if (waitForSelector != null) {
-      final selectorEsc = waitForSelector.replaceAll("'", r"\'");
-      const maxAttempts = 30; // 30 * 500мс = 15 сек
-      for (var i = 0; i < maxAttempts; i++) {
-        await Future.delayed(const Duration(milliseconds: 500));
-        final res = await ctrl.evaluateJavascript(
-          source: "document.querySelector('$selectorEsc') != null",
-        );
-        if (res == true || res == 'true') {
-          // Дополнительная пауза — дать плееру установить src
-          await Future.delayed(const Duration(milliseconds: 1500));
-          break;
-        }
-      }
-    } else {
-      await Future.delayed(const Duration(milliseconds: 2000));
-    }
-
-    // Polling: ждём пока video.src заполнится реальным okcdn/vkuser URL.
-    // VK Video отдаёт прямой MP4 (не HLS), src устанавливается асинхронно.
-    for (var i = 0; i < 20; i++) {
+    // Единый polling: ждём URL основного контента (не preroll).
+    // Максимум 12 сек (24 * 500мс).
+    String streamsJson = '[]';
+    const maxAttempts = 24;
+    for (var i = 0; i < maxAttempts; i++) {
       await Future.delayed(const Duration(milliseconds: 500));
-      final hasSrc = await ctrl.evaluateJavascript(source: """
-(function() {
-  var v = document.querySelector('video[src]');
-  if (v && (v.src.indexOf('okcdn') !== -1 || v.src.indexOf('vkuser') !== -1)) return true;
-  var s = document.querySelector('source[src]');
-  if (s && (s.src.indexOf('okcdn') !== -1 || s.src.indexOf('vkuser') !== -1)) return true;
-  return false;
-})()
-""");
-      if (hasSrc == true || hasSrc == 'true') break;
-    }
 
-    // JS-скрипт: вытаскиваем потоки из всех источников.
-    // VK Video (vkvideo.ru) отдаёт прямые MP4 на okcdn.ru и vkuser.net.
-    final streamsJson = await ctrl.evaluateJavascript(source: r"""
+      final result = await ctrl.evaluateJavascript(source: r"""
 (function() {
   var urls = [];
 
-  function isVideoUrl(u) {
-    return u && typeof u === 'string' && u.startsWith('http') &&
-      u.indexOf('blob:') === -1 &&
-      (u.indexOf('okcdn') !== -1 || u.indexOf('vkuser') !== -1 ||
-       u.indexOf('.mp4') !== -1 || u.indexOf('.m3u8') !== -1);
+  function isContent(u) {
+    if (!u || typeof u !== 'string') return false;
+    if (!u.startsWith('http')) return false;
+    if (u.indexOf('blob:') !== -1) return false;
+    var lower = u.toLowerCase();
+    if (lower.indexOf('type=5') !== -1) return false;
+    if (lower.indexOf('/ad_') !== -1) return false;
+    if (lower.indexOf('preroll') !== -1) return false;
+    if (lower.indexOf('advert') !== -1) return false;
+    return u.indexOf('okcdn') !== -1 || u.indexOf('vkuser') !== -1 ||
+           u.indexOf('.m3u8') !== -1;
   }
 
-  // 1. src у <video>
-  document.querySelectorAll('video').forEach(function(v) {
-    if (isVideoUrl(v.src)) urls.push(v.src);
-  });
+  try {
+    var rs = window.__remixSettings;
+    if (rs) {
+      var s = typeof rs === 'string' ? rs : JSON.stringify(rs);
+      var m = s.match(/https?:\/\/[^"'\]+(?:okcdn|vkuser|\.m3u8)[^"'\]*/g);
+      if (m) m.forEach(function(u) { if (isContent(u)) urls.push(u); });
+    }
+  } catch(e) {}
 
-  // 2. <source src>
-  document.querySelectorAll('source[src]').forEach(function(s) {
-    if (isVideoUrl(s.src)) urls.push(s.src);
-  });
-
-  // 3. В script тегах
-  document.querySelectorAll('script').forEach(function(sc) {
-    var t = sc.textContent || '';
-    if (t.indexOf('okcdn') === -1 && t.indexOf('vkuser') === -1) return;
-    var m = t.match(/"(https?:\/\/[^"]*(?:okcdn|vkuser)[^"]*)"/g);
-    if (m) m.forEach(function(raw) {
-      var u = raw.replace(/^"|"$/g, '');
-      if (isVideoUrl(u)) urls.push(u);
-    });
-  });
-
-  // 4. window.__DATA__ / window.playerParams
-  ['__DATA__', 'playerParams'].forEach(function(key) {
+  ['vkvideo_player_config', 'playerConfig', 'vkplayer'].forEach(function(key) {
     try {
       var obj = window[key];
       if (!obj) return;
       var s = typeof obj === 'string' ? obj : JSON.stringify(obj);
-      var m = s.match(/https?:\/\/[^"'\\\\]+(?:okcdn|vkuser|\.m3u8|\.mp4)[^"'\\\\]*/g);
-      if (m) m.forEach(function(u) { if (isVideoUrl(u)) urls.push(u); });
+      var m = s.match(/https?:\/\/[^"'\]+(?:okcdn|vkuser|\.m3u8)[^"'\]*/g);
+      if (m) m.forEach(function(u) { if (isContent(u)) urls.push(u); });
     } catch(e) {}
   });
 
-  // Дедуп и фильтр рекламы
-  var seen = {};
-  var clean = [];
-  urls.forEach(function(u) {
-    var lower = u.toLowerCase();
-    if (!seen[u] && lower.indexOf('/ad_') === -1 && lower.indexOf('preroll') === -1) {
-      seen[u] = true;
-      clean.push(u);
+  document.querySelectorAll('video[src]').forEach(function(v) {
+    var src = v.src;
+    if (!isContent(src)) return;
+    var typeMatch = src.match(/[?&]type=(\d+)/);
+    if (!typeMatch || typeMatch[1] === '7') {
+      urls.push(src);
     }
   });
 
-  return JSON.stringify(clean);
+  if (urls.length === 0) {
+    document.querySelectorAll('script').forEach(function(sc) {
+      var t = sc.textContent || '';
+      if (t.indexOf('okcdn') === -1 && t.indexOf('vkuser') === -1) return;
+      var m = t.match(/"(https?:\/\/[^"]*(?:okcdn|vkuser)[^"]*)"/g);
+      if (m) m.forEach(function(raw) {
+        var u = raw.replace(/^"|"$/g, '');
+        if (isContent(u)) urls.push(u);
+      });
+    });
+  }
+
+  if (urls.length === 0) return null;
+
+  var seen = {};
+  var result = [];
+  urls.forEach(function(u) {
+    if (!seen[u]) { seen[u] = true; result.push(u); }
+  });
+  return JSON.stringify(result);
 })()
 """);
 
-    // Получаем HTML страницы
+      if (result != null && result != 'null' && result is String && result != '[]') {
+        streamsJson = result;
+        break;
+      }
+    }
+
     final html = await ctrl.evaluateJavascript(
       source: 'document.documentElement.outerHTML',
     );
     final htmlStr = html is String ? html : '';
 
-    // Вставляем найденные потоки как комментарий в конец HTML
-    final streamsStr = streamsJson is String ? streamsJson : '[]';
-    return '$htmlStr\n<!-- VKTV_STREAMS: $streamsStr -->';
+    return '$htmlStr\n<!-- VKTV_STREAMS: $streamsJson -->';
   }
+
 
   /// Освободить Chromium (вызывать при logout / закрытии приложения).
   Future<void> dispose() async {
