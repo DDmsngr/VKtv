@@ -1,3 +1,4 @@
+# .github/workflows/build.yml
 name: Build APK
 
 on:
@@ -67,9 +68,8 @@ jobs:
           rm -f pubspec.lock
           flutter pub get
 
-      - name: Analyze (non-blocking)
+      - name: Analyze
         run: flutter analyze --no-fatal-infos
-        continue-on-error: true
 
       - name: Build debug APK
         run: flutter build apk --debug --target-platform android-arm64
