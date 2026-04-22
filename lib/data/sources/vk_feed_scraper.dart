@@ -283,25 +283,32 @@ class VkFeedScraper {
   function isTarget(u) {
     if (!u || typeof u !== 'string') return false;
     var lower = u.toLowerCase();
-    // Настоящие видео URL: vkvd*.okcdn.ru или vk*.vkuser.net с параметром expires=
-    // НЕ api.okcdn.ru/fb.do (пиксель) и не просто okcdn без expires
+    // Настоящие видео URL: vkvd*.okcdn.ru или vk*.vkuser.net с expires=
     var isVideoHost = (lower.indexOf('vkvd') !== -1 && lower.indexOf('okcdn') !== -1) ||
                       (lower.indexOf('vkuser') !== -1);
     if (!isVideoHost) return false;
     if (lower.indexOf('expires=') === -1) return false;
-    // Только основной контент (type=7), не preroll (type=5)
+    // Фильтруем рекламу (type=5) и трекеры
     if (lower.indexOf('type=5') !== -1) return false;
     if (lower.indexOf('/ad_') !== -1) return false;
     if (lower.indexOf('preroll') !== -1) return false;
     return true;
   }
 
+  function stripBytes(u) {
+    // Убираем &bytes=X-Y — это range-запрос, нам нужен базовый URL
+    return u.replace(/[&?]bytes=[0-9]+-[0-9]*/g, '').replace(/&&/g, '&').replace(/[?&]$/, '');
+  }
+
   // Патчим fetch
   var origFetch = window.fetch;
   window.fetch = function(input, init) {
     var u = typeof input === 'string' ? input : (input && input.url) || '';
-    if (isTarget(u) && window.__vktv_captured.indexOf(u) === -1) {
-      window.__vktv_captured.push(u);
+    if (isTarget(u)) {
+      var clean = stripBytes(u);
+      if (window.__vktv_captured.indexOf(clean) === -1) {
+        window.__vktv_captured.push(clean);
+      }
     }
     return origFetch.apply(this, arguments);
   };
@@ -309,8 +316,11 @@ class VkFeedScraper {
   // Патчим XHR
   var origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
-    if (isTarget(url) && window.__vktv_captured.indexOf(url) === -1) {
-      window.__vktv_captured.push(url);
+    if (isTarget(url)) {
+      var cleanUrl = stripBytes(url);
+      if (window.__vktv_captured.indexOf(cleanUrl) === -1) {
+        window.__vktv_captured.push(cleanUrl);
+      }
     }
     return origOpen.apply(this, arguments);
   };
