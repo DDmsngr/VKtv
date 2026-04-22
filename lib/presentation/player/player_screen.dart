@@ -43,8 +43,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _controller = VideoController(
       _player,
       configuration: const VideoControllerConfiguration(
-        // AndroidSurfaceProducer.image решает чёрный экран на Android/LDPlayer
+        // false = Surface присоединяется ДО получения параметров видео.
+        // Решает чёрный экран на Android/LDPlayer где Surface создаётся медленно.
         androidAttachSurfaceAfterVideoParameters: false,
+        // Отключаем HW-ускорение как fallback для эмуляторов (LDPlayer).
+        // На реальных устройствах можно включить обратно.
+        enableHardwareAcceleration: false,
       ),
     );
     _keyboardFocusNode = FocusNode(debugLabel: 'player_keyboard_listener');
@@ -71,6 +75,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       }
     }
 
+    // Пауза 300мс: даём VideoController зарегистрировать Surface
+    // в Android TextureRegistry перед стартом декодирования.
+    // Без этого на LDPlayer первые кадры теряются -> чёрный экран.
+    await Future.delayed(const Duration(milliseconds: 300));
     await _player.open(Media(streamUrl));
     if (mounted) setState(() => _loading = false);
 
