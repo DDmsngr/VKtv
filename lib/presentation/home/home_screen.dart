@@ -1,3 +1,4 @@
+// lib/presentation/home/home_screen.dart
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -19,6 +20,7 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
+  final _keyboardFocus = FocusNode(debugLabel: 'home_keyboard_listener');
   Timer? _debounce;
 
   @override
@@ -26,6 +28,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _debounce?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
+    _keyboardFocus.dispose();
     super.dispose();
   }
 
@@ -62,14 +65,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final query = ref.watch(searchQueryProvider);
     final isAuth = ref.watch(authStateProvider);
 
-    final searchAsync = query.isNotEmpty
-        ? ref.watch(searchResultsProvider(query))
-        : null;
+    final searchAsync =
+        query.isNotEmpty ? ref.watch(searchResultsProvider(query)) : null;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F0F),
       body: KeyboardListener(
-        focusNode: FocusNode(),
+        focusNode: _keyboardFocus,
         onKeyEvent: (event) {
           if (event is KeyDownEvent &&
               event.logicalKey == LogicalKeyboardKey.escape) {
@@ -227,8 +229,8 @@ class _EmptyState extends StatelessWidget {
               onPressed: onLoginTap,
               style: FilledButton.styleFrom(
                 backgroundColor: const Color(0xFF5181B8),
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 32, vertical: 16),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
               ),
               child: const Text('Войти'),
             ),
@@ -283,8 +285,7 @@ class _TopBar extends StatelessWidget {
               decoration: InputDecoration(
                 hintText: 'Поиск...',
                 hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
-                prefixIcon:
-                    const Icon(Icons.search, color: Colors.white38),
+                prefixIcon: const Icon(Icons.search, color: Colors.white38),
                 filled: true,
                 fillColor: Colors.white.withOpacity(0.07),
                 border: OutlineInputBorder(
