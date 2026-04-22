@@ -54,6 +54,8 @@ class VkFeedScraper {
   /// Единый headless экземпляр, переиспользуемый между запросами.
   /// Первый запрос прогревает Chromium (~1-2 сек), дальнейшие быстрые.
   HeadlessInAppWebView? _webView;
+  final List<String> _capturedStreamUrls = [];
+  bool _capturingStreams = false;
   InAppWebViewController? _controller;
   Completer<void>? _loadCompleter;
   int _loadToken = 0;
@@ -80,6 +82,30 @@ class VkFeedScraper {
         mediaPlaybackRequiresUserGesture: false,
       ),
       shouldInterceptRequest: (controller, request) async {
+        // Перехватываем URL видеопотоков когда активен режим extraction
+        if (_capturingStreams) {
+          final u = request.url.toString();
+          final lo = u.toLowerCase();
+          final isVideoHost = (lo.contains('vkvd') && lo.contains('okcdn')) ||
+              lo.contains('vkuser.net');
+          if (isVideoHost &&
+              lo.contains('expires=') &&
+              !lo.contains('type=5') &&
+              !lo.contains('/ad_') &&
+              !lo.contains('preroll')) {
+            // Убираем bytes= range параметр
+            var clean = u;
+            final bi = u.contains('&bytes=')
+                ? u.indexOf('&bytes=')
+                : u.contains('?bytes=')
+                    ? u.indexOf('?bytes=')
+                    : -1;
+            if (bi != -1) clean = u.substring(0, bi);
+            if (!_capturedStreamUrls.contains(clean)) {
+              _capturedStreamUrls.add(clean);
+            }
+          }
+        }
         if (AdBlocker.shouldBlockRequest(request.url)) {
           return WebResourceResponse(
             contentType: 'text/plain',
@@ -264,39 +290,9 @@ class VkFeedScraper {
     final ctrl = _controller!;
     final token = ++_loadToken;
 
-    // Interceptor: patches fetch/XHR to capture vkvd*.okcdn.ru requests.
-    // Written as concatenated string literals to avoid [] inside Dart strings.
-    final interceptorJs =
-        'if(window.__vktv_patched)return;'
-        'window.__vktv_patched=true;window.__vktv_captured=[];'
-        'function _vkOk(u){'
-          'var lo=(u||String()).toLowerCase();'
-          'var host=(lo.indexOf("vkvd")!==-1&&lo.indexOf("okcdn")!==-1)||lo.indexOf("vkuser")!==-1;'
-          'return host&&lo.indexOf("expires=")!==-1&&lo.indexOf("type=5")===-1;'
-        '}'
-        'function _vkSave(u){'
-          'var bi=u.indexOf("&bytes=");if(bi===-1)bi=u.indexOf("?bytes=");'
-          'var cu=bi!==-1?u.substring(0,bi):u;'
-          'if(window.__vktv_captured.indexOf(cu)===-1)window.__vktv_captured.push(cu);'
-        '}'
-        'var _ovf=window.fetch;'
-        'window.fetch=function(i,o){'
-          'var u=typeof i==="string"?i:(i&&i.url)||"";'
-          'if(_vkOk(u))_vkSave(u);'
-          'return _ovf.apply(this,arguments);'
-        '};'
-        'var _oxo=XMLHttpRequest.prototype.open;'
-        'XMLHttpRequest.prototype.open=function(m,u){'
-          'if(_vkOk(u||String()))_vkSave(u);'
-          'return _oxo.apply(this,arguments);'
-        '};';
-
-    await ctrl.addUserScript(
-      userScript: UserScript(
-        source: interceptorJs,
-        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-      ),
-    );
+    // Включаем перехват URL видеопотоков через shouldInterceptRequest
+    _capturedStreamUrls.clear();
+    _capturingStreams = true;
 
     _loadCompleter = Completer<void>();
     await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
@@ -307,26 +303,26 @@ class VkFeedScraper {
       // Continue
     } catch (_) {}
 
-    // Poll for captured URLs max 12 sec
-    var streamsJson = '[]';
+    // Ждём появления URL в _capturedStreamUrls, макс 12 сек
     for (var i = 0; i < 24; i++) {
+      if (_capturedStreamUrls.isNotEmpty) break;
       await Future.delayed(const Duration(milliseconds: 500));
-      final result = await ctrl.evaluateJavascript(
-        source: '(function(){'
-            'var c=window.__vktv_captured;'
-            'if(!c||c.length===0)return null;'
-            'return JSON.stringify(c);})()',
-      );
-      if (result != null && result != 'null' && result is String && result != '[]') {
-        streamsJson = result;
-        break;
-      }
     }
 
-    await ctrl.removeAllUserScripts();
-    await ctrl.evaluateJavascript(
-      source: 'window.__vktv_patched=false;window.__vktv_captured=[];',
-    );
+    _capturingStreams = false;
+    final captured = List<String>.from(_capturedStreamUrls);
+    _capturedStreamUrls.clear();
+
+    // Сериализуем перехваченные URL в JSON
+    final sb = StringBuffer('[');
+    for (var i = 0; i < captured.length; i++) {
+      sb.write('"');
+      sb.write(captured[i].replaceAll('"', r'\"'));
+      sb.write('"');
+      if (i < captured.length - 1) sb.write(',');
+    }
+    sb.write(']');
+    final streamsJson = sb.toString();
 
     final html = await ctrl.evaluateJavascript(
       source: 'document.documentElement.outerHTML',
