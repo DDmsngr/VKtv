@@ -283,11 +283,17 @@ class VkFeedScraper {
   function isTarget(u) {
     if (!u || typeof u !== 'string') return false;
     var lower = u.toLowerCase();
+    // Настоящие видео URL: vkvd*.okcdn.ru или vk*.vkuser.net с параметром expires=
+    // НЕ api.okcdn.ru/fb.do (пиксель) и не просто okcdn без expires
+    var isVideoHost = (lower.indexOf('vkvd') !== -1 && lower.indexOf('okcdn') !== -1) ||
+                      (lower.indexOf('vkuser') !== -1);
+    if (!isVideoHost) return false;
+    if (lower.indexOf('expires=') === -1) return false;
     // Только основной контент (type=7), не preroll (type=5)
     if (lower.indexOf('type=5') !== -1) return false;
     if (lower.indexOf('/ad_') !== -1) return false;
     if (lower.indexOf('preroll') !== -1) return false;
-    return lower.indexOf('okcdn') !== -1 || lower.indexOf('vkuser') !== -1;
+    return true;
   }
 
   // Патчим fetch
