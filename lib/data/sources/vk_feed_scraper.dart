@@ -356,7 +356,7 @@ class VkFeedScraper {
     );
     final htmlStr = html is String ? html : '';
 
-    return '\$htmlStr\n<!-- VKTV_STREAMS: \$streamsJson -->';
+    return '$htmlStr\n<!-- VKTV_STREAMS: $streamsJson -->';
   }
 
 
