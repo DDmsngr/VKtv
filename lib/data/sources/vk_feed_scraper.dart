@@ -252,6 +252,121 @@ class VkFeedScraper {
     }
   }
 
+  /// Загружает страницу видео для VkExtractor.
+  ///
+  /// В отличие от [_fetchHtml], после загрузки выполняет JS для поиска
+  /// URL потоков прямо в DOM/window и вставляет их как комментарий
+  /// <!-- VKTV_STREAMS: [...] --> в конец HTML. Так extractor не нужен
+  /// доступ к InAppWebViewController напрямую.
+  Future<String> fetchPageForExtractor(
+    String url, {
+    String? waitForSelector,
+  }) async {
+    await _ensureWebView();
+    final ctrl = _controller!;
+
+    _loadCompleter = Completer<void>();
+    await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+
+    try {
+      await _loadCompleter!.future.timeout(const Duration(seconds: 25));
+    } on TimeoutException {
+      // Продолжаем — плеер мог частично загрузиться
+    }
+
+    // Ждём появления <video> или <source src> — плеер инициализирован
+    if (waitForSelector != null) {
+      final selectorEsc = waitForSelector.replaceAll("'", r"\'");
+      const maxAttempts = 30; // 30 * 500мс = 15 сек
+      for (var i = 0; i < maxAttempts; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        final res = await ctrl.evaluateJavascript(
+          source: "document.querySelector('$selectorEsc') != null",
+        );
+        if (res == true || res == 'true') {
+          // Дополнительная пауза — дать плееру установить src
+          await Future.delayed(const Duration(milliseconds: 1500));
+          break;
+        }
+      }
+    } else {
+      await Future.delayed(const Duration(milliseconds: 2000));
+    }
+
+    // JS-скрипт: вытаскиваем потоки из всех известных источников
+    final streamsJson = await ctrl.evaluateJavascript(source: r"""
+(function() {
+  var urls = [];
+
+  // 1. Прямой src у <video>
+  var video = document.querySelector('video');
+  if (video && video.src && video.src.startsWith('http') && video.src.indexOf('blob:') === -1) {
+    urls.push(video.src);
+  }
+
+  // 2. <source src> внутри <video>
+  var sources = document.querySelectorAll('source[src]');
+  sources.forEach(function(s) {
+    if (s.src && s.src.startsWith('http') && s.src.indexOf('blob:') === -1) {
+      urls.push(s.src);
+    }
+  });
+
+  // 3. window.__DATA__ — VK кладёт сюда параметры плеера
+  try {
+    if (window.__DATA__) {
+      var d = JSON.stringify(window.__DATA__);
+      var matches = d.match(/https?:[^"'\\\\]+\.(m3u8|mp4)[^"'\\\\]*/g);
+      if (matches) matches.forEach(function(u) { urls.push(u); });
+    }
+  } catch(e) {}
+
+  // 4. window.playerParams
+  try {
+    if (window.playerParams) {
+      var p = typeof window.playerParams === 'string'
+        ? JSON.parse(window.playerParams)
+        : window.playerParams;
+      ['hls','url2160','url1440','url1080','url720','url480','url360','url240'].forEach(function(k) {
+        if (p[k] && typeof p[k] === 'string') urls.push(p[k]);
+        if (p.params && p.params[0] && p.params[0][k]) urls.push(p.params[0][k]);
+      });
+    }
+  } catch(e) {}
+
+  // 5. Ищем mp4/m3u8 ключи в window.vk
+  try {
+    var vk = window.vk || {};
+    var s = JSON.stringify(vk);
+    var matches = s.match(/https?:[^"'\\\\]+\.(m3u8|mp4)[^"'\\\\]*/g);
+    if (matches) matches.forEach(function(u) { urls.push(u); });
+  } catch(e) {}
+
+  // Дедуп и фильтр рекламы
+  var seen = {};
+  var clean = [];
+  urls.forEach(function(u) {
+    if (!seen[u] && u.indexOf('/ad_') === -1 && u.indexOf('preroll') === -1) {
+      seen[u] = true;
+      clean.push(u);
+    }
+  });
+
+  return JSON.stringify(clean);
+})()
+""");
+
+    // Получаем HTML страницы
+    final html = await ctrl.evaluateJavascript(
+      source: 'document.documentElement.outerHTML',
+    );
+    final htmlStr = html is String ? html : '';
+
+    // Вставляем найденные потоки как комментарий в конец HTML
+    final streamsStr = streamsJson is String ? streamsJson : '[]';
+    return '$htmlStr\n<!-- VKTV_STREAMS: $streamsStr -->';
+  }
+
   /// Освободить Chromium (вызывать при logout / закрытии приложения).
   Future<void> dispose() async {
     try {

@@ -37,7 +37,7 @@ class VideoRow extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: 200,
+            height: 240,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 48),

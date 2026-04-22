@@ -21,7 +21,8 @@ final authStateProvider = StateProvider<bool>((ref) {
 
 final vkExtractorProvider = Provider<VkExtractor>((ref) {
   final store = ref.watch(sessionStoreProvider);
-  final extractor = VkExtractor();
+  final scraper = ref.watch(vkFeedScraperProvider);
+  final extractor = VkExtractor(scraper);
   final saved = store.cookie;
   if (saved != null && saved.isNotEmpty) {
     extractor.setSessionCookie(saved);
