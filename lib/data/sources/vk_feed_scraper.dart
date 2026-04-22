@@ -256,15 +256,6 @@ class VkFeedScraper {
   /// URL потоков прямо в DOM/window и вставляет их как комментарий
   /// <!-- VKTV_STREAMS: [...] --> в конец HTML. Так extractor не нужен
   /// доступ к InAppWebViewController напрямую.
-  /// Загружает страницу видео и перехватывает URL потока через fetch/XHR interceptor.
-  ///
-  /// VK Video использует MediaSource Extensions (MSE) + Shadow DOM: URL видео
-  /// никогда не появляется в <video src> или DOM атрибутах. Плеер качает
-  /// сегменты через fetch() внутри своего бандла.
-  ///
-  /// Решение: инжектируем userScript ПЕРЕД загрузкой страницы. Он патчит
-  /// window.fetch и XMLHttpRequest, перехватывая все запросы к okcdn/vkuser
-  /// и сохраняя их в window.__vktv_captured[]. После загрузки читаем массив.
   Future<String> fetchPageForExtractor(
     String url, {
     String? waitForSelector,
@@ -273,69 +264,36 @@ class VkFeedScraper {
     final ctrl = _controller!;
     final token = ++_loadToken;
 
-    // Инжектируем перехватчик ПЕРЕД loadUrl чтобы он поймал первые запросы
-    final interceptorScript = """
-(function() {
-  if (window.__vktv_patched) return;
-  window.__vktv_patched = true;
-  window.__vktv_captured = [];
-
-  function isTarget(u) {
-    if (!u || typeof u !== 'string') return false;
-    var lower = u.toLowerCase();
-    // Настоящие видео URL: vkvd*.okcdn.ru или vk*.vkuser.net с expires=
-    var isVideoHost = (lower.indexOf('vkvd') !== -1 && lower.indexOf('okcdn') !== -1) ||
-                      (lower.indexOf('vkuser') !== -1);
-    if (!isVideoHost) return false;
-    if (lower.indexOf('expires=') === -1) return false;
-    // Фильтруем рекламу (type=5) и трекеры
-    if (lower.indexOf('type=5') !== -1) return false;
-    if (lower.indexOf('/ad_') !== -1) return false;
-    if (lower.indexOf('preroll') !== -1) return false;
-    return true;
-  }
-
-  function stripBytes(u) {
-    // Убираем &bytes=X-Y без regex (Dart парсит [] внутри """ строк)
-    var idx = u.indexOf('&bytes=');
-    if (idx === -1) idx = u.indexOf('?bytes=');
-    if (idx !== -1) u = u.substring(0, idx);
-    if (u.charAt(u.length - 1) === '?' || u.charAt(u.length - 1) === '&') {
-      u = u.substring(0, u.length - 1);
-    }
-    return u;
-  }
-
-  // Патчим fetch
-  var origFetch = window.fetch;
-  window.fetch = function(input, init) {
-    var u = typeof input === 'string' ? input : (input && input.url) || '';
-    if (isTarget(u)) {
-      var clean = stripBytes(u);
-      if (window.__vktv_captured.indexOf(clean) === -1) {
-        window.__vktv_captured.push(clean);
-      }
-    }
-    return origFetch.apply(this, arguments);
-  };
-
-  // Патчим XHR
-  var origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    if (isTarget(url)) {
-      var cleanUrl = stripBytes(url);
-      if (window.__vktv_captured.indexOf(cleanUrl) === -1) {
-        window.__vktv_captured.push(cleanUrl);
-      }
-    }
-    return origOpen.apply(this, arguments);
-  };
-})();
-""";
+    // Interceptor: patches fetch/XHR to capture vkvd*.okcdn.ru requests.
+    // Written as concatenated string literals to avoid [] inside Dart strings.
+    final interceptorJs =
+        'if(window.__vktv_patched)return;'
+        'window.__vktv_patched=true;window.__vktv_captured=[];'
+        'function _vkOk(u){'
+          'var lo=(u||String()).toLowerCase();'
+          'var host=(lo.indexOf("vkvd")!==-1&&lo.indexOf("okcdn")!==-1)||lo.indexOf("vkuser")!==-1;'
+          'return host&&lo.indexOf("expires=")!==-1&&lo.indexOf("type=5")===-1;'
+        '}'
+        'function _vkSave(u){'
+          'var bi=u.indexOf("&bytes=");if(bi===-1)bi=u.indexOf("?bytes=");'
+          'var cu=bi!==-1?u.substring(0,bi):u;'
+          'if(window.__vktv_captured.indexOf(cu)===-1)window.__vktv_captured.push(cu);'
+        '}'
+        'var _ovf=window.fetch;'
+        'window.fetch=function(i,o){'
+          'var u=typeof i==="string"?i:(i&&i.url)||"";'
+          'if(_vkOk(u))_vkSave(u);'
+          'return _ovf.apply(this,arguments);'
+        '};'
+        'var _oxo=XMLHttpRequest.prototype.open;'
+        'XMLHttpRequest.prototype.open=function(m,u){'
+          'if(_vkOk(u||String()))_vkSave(u);'
+          'return _oxo.apply(this,arguments);'
+        '};';
 
     await ctrl.addUserScript(
       userScript: UserScript(
-        source: interceptorScript,
+        source: interceptorJs,
         injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
       ),
     );
@@ -346,38 +304,34 @@ class VkFeedScraper {
     try {
       await _awaitLoadOrStale(token).timeout(const Duration(seconds: 20));
     } on TimeoutException {
-      // Продолжаем
+      // Continue
     } catch (_) {}
 
-    // Polling: ждём появления captured URL (макс 12 сек)
-    String streamsJson = '[]';
+    // Poll for captured URLs max 12 sec
+    var streamsJson = '[]';
     for (var i = 0; i < 24; i++) {
       await Future.delayed(const Duration(milliseconds: 500));
-      final result = await ctrl.evaluateJavascript(source: """
-(function() {
-  var captured = window.__vktv_captured;
-  if (!captured || captured.length === 0) return null;
-  return JSON.stringify(captured);
-})()
-""");
+      final result = await ctrl.evaluateJavascript(
+        source: '(function(){'
+            'var c=window.__vktv_captured;'
+            'if(!c||c.length===0)return null;'
+            'return JSON.stringify(c);})()',
+      );
       if (result != null && result != 'null' && result is String && result != '[]') {
         streamsJson = result;
         break;
       }
     }
 
-    // Убираем userScript чтобы не мешал следующим загрузкам (лента и т.д.)
     await ctrl.removeAllUserScripts();
-    // Сбрасываем флаг патча для следующего вызова
     await ctrl.evaluateJavascript(
-      source: 'window.__vktv_patched = false; window.__vktv_captured = [];',
+      source: 'window.__vktv_patched=false;window.__vktv_captured=[];',
     );
 
     final html = await ctrl.evaluateJavascript(
       source: 'document.documentElement.outerHTML',
     );
     final htmlStr = html is String ? html : '';
-
     return '$htmlStr\n<!-- VKTV_STREAMS: $streamsJson -->';
   }
 
