@@ -191,7 +191,7 @@ class VkFeedScraper {
   Future<List<PlaylistEntity>> fetchHome() async {
     const url = 'https://vkvideo.ru/';
     try {
-      final html = await _fetchHtml(url, waitForSelector: '[data-mvid], .video-card, .VideoCard, [data-video]');
+      final html = await _fetchHtml(url, waitForSelector: '[data-testid="video_card_layout"], [data-testid="video_card_thumb"]');
       final videos = _parseCards(html);
       lastSnapshot = ScraperDebugSnapshot(
         url: url,
@@ -224,7 +224,7 @@ class VkFeedScraper {
     if (query.trim().isEmpty) return const [];
     final url = 'https://vkvideo.ru/search?q=${Uri.encodeQueryComponent(query)}';
     try {
-      final html = await _fetchHtml(url, waitForSelector: '[data-mvid], .video-card, .VideoCard, [data-video]');
+      final html = await _fetchHtml(url, waitForSelector: '[data-testid="video_card_layout"], [data-testid="video_card_thumb"]');
       final videos = _parseCards(html);
       lastSnapshot = ScraperDebugSnapshot(
         url: url,
@@ -263,59 +263,87 @@ class VkFeedScraper {
 
   // ── Парсинг карточек ────────────────────────────────────────────────────
 
+  /// Парсит карточки с vkvideo.ru.
+  ///
+  /// Страница — React SPA, использует data-testid атрибуты (стабильны)
+  /// и CSS-modules с хешами (vkitVideoCardLayout__card--mEdj1, итд).
+  /// Главные якоря:
+  ///   - <a data-testid="video_card_thumb" href="https://vkvideo.ru/video-123_456">
+  ///   - <img alt="Название" src="https://sun9-...userapi.com/..."/>
+  ///   - <span data-testid="video_card_duration">17:30</span>
   List<VideoEntity> _parseCards(String html) {
     final out = <VideoEntity>[];
     final seen = <String>{};
 
-    final idPatterns = [
-      RegExp(r'data-video="(-?\d+_\d+)"'),
-      RegExp(r'data-mvid="(-?\d+_\d+)"'),
-      RegExp(r'data-id="video_(-?\d+_\d+)"'),
-      RegExp(r'/video(-?\d+_\d+)[?"\s]'),
-    ];
-
-    // Стратегия 1: JSON-инлайн на странице (window.__INITIAL_STATE__ etc.)
-    final jsonRe = RegExp(
-      r'"video(-?\d+_\d+)"[^}]{0,500}?"title"\s*:\s*"([^"]+)"',
+    // Разбиваем HTML на "карточки" — каждая начинается с data-testid="video_card_layout"
+    // или "video_card_thumb". Используем layout как контейнер (там и превью, и инфо с автором).
+    final cardRe = RegExp(
+      r'data-testid="video_card_layout"',
     );
-    for (final m in jsonRe.allMatches(html)) {
-      final id = m.group(1)!;
-      if (seen.contains(id)) continue;
-      seen.add(id);
-      out.add(_mkEntity(id, title: _unescape(m.group(2) ?? '')));
+    final cardStarts = cardRe
+        .allMatches(html)
+        .map((m) => m.start)
+        .toList();
+
+    if (cardStarts.isEmpty) {
+      // Фолбэк: иногда VK рендерит без layout, только thumb'ами
+      return _parseThumbsOnly(html);
     }
 
-    // Стратегия 2: DOM блоки .video_item / .video-card
-    final chunks = html.split(
-      RegExp(r'(?=class="[^"]*(?:video_item|video-card)[^"]*")'),
-    );
-    for (final chunk in chunks) {
-      String? id;
-      for (final re in idPatterns) {
-        final m = re.firstMatch(chunk);
-        if (m != null) { id = m.group(1); break; }
-      }
-      if (id == null) continue;
+    for (var i = 0; i < cardStarts.length; i++) {
+      final from = cardStarts[i];
+      final to = i + 1 < cardStarts.length
+          ? cardStarts[i + 1]
+          : (from + 6000 > html.length ? html.length : from + 6000);
+      final chunk = html.substring(from, to);
+
+      // 1. ID видео — достаём из href у thumb-ссылки
+      final hrefMatch = RegExp(
+        r'data-testid="video_card_thumb"[^>]*href="([^"]+)"',
+      ).firstMatch(chunk) ??
+          RegExp(
+            r'href="([^"]+)"[^>]*data-testid="video_card_thumb"',
+          ).firstMatch(chunk) ??
+          // Последний шанс — любой href с video
+          RegExp(r'href="(https?://[^"]*/video-?\d+_\d+[^"]*)"').firstMatch(chunk);
+      if (hrefMatch == null) continue;
+      final href = hrefMatch.group(1)!;
+      final idMatch = RegExp(r'/video(-?\d+_\d+)').firstMatch(href);
+      if (idMatch == null) continue;
+      final id = idMatch.group(1)!;
       if (seen.contains(id)) continue;
       seen.add(id);
 
-      final title = _firstMatch(chunk, [
-        RegExp(r'class="[^"]*video_item__title[^"]*"[^>]*>([^<]+)<'),
-        RegExp(r'class="[^"]*video-card__title[^"]*"[^>]*>([^<]+)<'),
-        RegExp(r'title="([^"]+)"'),
-      ]);
-      final thumb = _firstMatch(chunk, [
-        RegExp(r'''background-image:\s*url\(['"]?(https?://[^'"()\s]+)['"]?\)'''),
-        RegExp(r'<img[^>]+src="(https?://[^"]+)"'),
-      ]);
-      final author = _firstMatch(chunk, [
-        RegExp(r'class="[^"]*video_item__author[^"]*"[^>]*>([^<]+)<'),
-        RegExp(r'class="[^"]*video-card__author[^"]*"[^>]*>([^<]+)<'),
-      ]);
-      final durMatch = RegExp(
-        r'class="[^"]*(?:video_item__duration|video-card__duration)[^"]*"[^>]*>(\d+):(\d+)(?::(\d+))?',
-      ).firstMatch(chunk);
+      // 2. Название и thumbnail — из <img ... alt="..." src="...">
+      //    В новой вёрстке img имеет класс vkitVideoCardPreviewImage__img
+      String? title;
+      String? thumb;
+      final imgRe = RegExp(
+        r'<img[^>]*class="[^"]*vkitVideoCardPreviewImage__img[^"]*"[^>]*>',
+      );
+      final imgMatch = imgRe.firstMatch(chunk);
+      if (imgMatch != null) {
+        final imgTag = imgMatch.group(0)!;
+        title = RegExp(r'alt="([^"]+)"').firstMatch(imgTag)?.group(1);
+        thumb = RegExp(r'src="(https?://[^"]+)"').firstMatch(imgTag)?.group(1);
+      }
+      // Fallback на любой <img> с alt
+      if (title == null || title.isEmpty) {
+        final fallbackImg = RegExp(
+          r'<img[^>]+alt="([^"]+)"[^>]+src="(https?://[^"]+)"',
+        ).firstMatch(chunk);
+        if (fallbackImg != null) {
+          title = fallbackImg.group(1);
+          thumb ??= fallbackImg.group(2);
+        }
+      }
+      // Ещё fallback — aria-label на ссылке
+      title ??= RegExp(r'aria-label="([^"]+)"').firstMatch(chunk)?.group(1);
 
+      // 3. Длительность — data-testid="video_card_duration"
+      final durMatch = RegExp(
+        r'data-testid="video_card_duration"[^>]*>(\d+):(\d+)(?::(\d+))?<',
+      ).firstMatch(chunk);
       Duration duration = Duration.zero;
       if (durMatch != null) {
         final a = int.tryParse(durMatch.group(1) ?? '') ?? 0;
@@ -326,40 +354,69 @@ class VkFeedScraper {
             : Duration(minutes: a, seconds: b);
       }
 
+      // 4. Автор — data-testid="video_card_author" с aria-label
+      final authorMatch = RegExp(
+        r'data-testid="video_card_author"[^>]*aria-label="([^"]+)"',
+      ).firstMatch(chunk) ??
+          RegExp(
+            r'aria-label="([^"]+)"[^>]*data-testid="video_card_author"',
+          ).firstMatch(chunk);
+      final author = authorMatch?.group(1) ?? '';
+
       out.add(VideoEntity(
         id: id,
         title: _unescape(title ?? 'Без названия'),
         description: '',
         thumbUrl: thumb ?? '',
-        pageUrl: 'https://vk.com/video$id',
+        pageUrl: href.startsWith('http') ? href : 'https://vkvideo.ru$href',
         duration: duration,
         views: 0,
-        ownerName: _unescape(author ?? ''),
+        ownerName: _unescape(author),
       ));
     }
 
     return out;
   }
 
-  VideoEntity _mkEntity(String id, {required String title}) => VideoEntity(
+  /// Fallback: если data-testid не нашли — пробегаемся по всем ссылкам на видео
+  /// и извлекаем минимум информации. Используется когда VK меняет разметку.
+  List<VideoEntity> _parseThumbsOnly(String html) {
+    final out = <VideoEntity>[];
+    final seen = <String>{};
+    final linkRe = RegExp(
+      r'<a[^>]+href="(https?://[^"]*/video(-?\d+_\d+)[^"]*)"[^>]*>',
+    );
+    for (final m in linkRe.allMatches(html)) {
+      final href = m.group(1)!;
+      final id = m.group(2)!;
+      if (seen.contains(id)) continue;
+      seen.add(id);
+      // Пытаемся найти <img> в следующих 2000 символах после ссылки
+      final after = html.substring(
+        m.end,
+        m.end + 2000 > html.length ? html.length : m.end + 2000,
+      );
+      String? title;
+      String? thumb;
+      final img = RegExp(
+        r'<img[^>]+alt="([^"]+)"[^>]+src="(https?://[^"]+)"',
+      ).firstMatch(after);
+      if (img != null) {
+        title = img.group(1);
+        thumb = img.group(2);
+      }
+      out.add(VideoEntity(
         id: id,
-        title: title.isEmpty ? 'Без названия' : title,
+        title: _unescape(title ?? 'Без названия'),
         description: '',
-        thumbUrl: '',
-        pageUrl: 'https://vk.com/video$id',
+        thumbUrl: thumb ?? '',
+        pageUrl: href,
         duration: Duration.zero,
         views: 0,
         ownerName: '',
-      );
-
-  String? _firstMatch(String haystack, List<RegExp> patterns) {
-    for (final re in patterns) {
-      final m = re.firstMatch(haystack);
-      if (m != null && m.group(1) != null && m.group(1)!.isNotEmpty) {
-        return m.group(1);
-      }
+      ));
     }
-    return null;
+    return out;
   }
 
   /// Делает "умное" превью: если в HTML найдены карточки видео — показывает
