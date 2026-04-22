@@ -17,6 +17,10 @@ class DebugScreen extends ConsumerStatefulWidget {
 class _DebugScreenState extends ConsumerState<DebugScreen> {
   bool _loading = false;
   String _status = '';
+  String _extractorResult = '';
+  final _videoUrlController = TextEditingController(
+    text: 'https://vkvideo.ru/video-220754053_456245722',
+  );
 
   Future<void> _probe(Future<void> Function() fn, String label) async {
     setState(() {
@@ -31,6 +35,12 @@ class _DebugScreenState extends ConsumerState<DebugScreen> {
     } finally {
       setState(() => _loading = false);
     }
+  }
+
+  @override
+  void dispose() {
+    _videoUrlController.dispose();
+    super.dispose();
   }
 
   @override
@@ -78,6 +88,38 @@ class _DebugScreenState extends ConsumerState<DebugScreen> {
                           _probe(() => scraper.search('омен'), 'search омен'),
                 ),
                 _action(
+                  'Тест экстрактора',
+                  _loading
+                      ? null
+                      : () async {
+                          setState(() {
+                            _loading = true;
+                            _status = 'Запускаю экстрактор...';
+                            _extractorResult = '';
+                          });
+                          try {
+                            final result = await extractor.extractDebug(
+                              _videoUrlController.text.trim(),
+                            );
+                            setState(() {
+                              _extractorResult =
+                                  'captured_raw: \${result['captured_raw']}\n\n'
+                                  'parsed: \${result['parsed']}\n\n'
+                                  'html_length: \${result['html_length']}\n\n'
+                                  'error: \${result['error']}';
+                              _status = 'Экстрактор — готово';
+                            });
+                          } catch (e) {
+                            setState(() {
+                              _extractorResult = 'Exception: \$e';
+                              _status = 'Экстрактор — ошибка';
+                            });
+                          } finally {
+                            setState(() => _loading = false);
+                          }
+                        },
+                ),
+                _action(
                   'Поиск: "новости"',
                   _loading
                       ? null
@@ -87,10 +129,42 @@ class _DebugScreenState extends ConsumerState<DebugScreen> {
               ],
             ),
             const SizedBox(height: 16),
+            TextField(
+              controller: _videoUrlController,
+              style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 11),
+              decoration: const InputDecoration(
+                labelText: 'URL видео для теста',
+                labelStyle: TextStyle(color: Colors.white54),
+                border: OutlineInputBorder(),
+                enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+              ),
+            ),
+            const SizedBox(height: 8),
             if (_status.isNotEmpty)
               Text(_status,
                   style: const TextStyle(
                       color: Color(0xFF9B8FF5), fontFamily: 'monospace')),
+            if (_extractorResult.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _label('Результат экстрактора'),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: SelectableText(
+                  _extractorResult,
+                  style: const TextStyle(
+                    color: Color(0xFFCFCFD4),
+                    fontFamily: 'monospace',
+                    fontSize: 10,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
 
             // Snapshot
