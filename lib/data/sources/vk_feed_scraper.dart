@@ -94,8 +94,19 @@ class VkFeedScraper {
         _loadCompleter?.complete();
       },
       onReceivedError: (controller, request, error) {
+        // Ошибки подресурсов (картинки, xhr, заблокированная реклама) игнорируем.
+        // Реагируем только на main frame.
+        if (request.isForMainFrame != true) return;
         if (_loadCompleter != null && !_loadCompleter!.isCompleted) {
           _loadCompleter!.completeError('WebView error: ${error.description}');
+        }
+      },
+      onReceivedHttpError: (controller, request, errorResponse) {
+        if (request.isForMainFrame != true) return;
+        if (_loadCompleter != null && !_loadCompleter!.isCompleted) {
+          _loadCompleter!.completeError(
+            'HTTP ${errorResponse.statusCode}: ${errorResponse.reasonPhrase ?? "?"}',
+          );
         }
       },
     );
@@ -115,23 +126,46 @@ class VkFeedScraper {
     c.complete();
   }
 
-  /// Загружает страницу и возвращает её outerHTML после onLoadStop.
-  Future<String> _fetchHtml(String url) async {
+  /// Загружает страницу и возвращает её outerHTML.
+  /// Если [waitForSelector] задан — ждёт появления элемента в DOM
+  /// (polling каждые 400мс, максимум 10 сек после onLoadStop).
+  Future<String> _fetchHtml(String url, {String? waitForSelector}) async {
     await _ensureWebView();
     final ctrl = _controller!;
 
     _loadCompleter = Completer<void>();
     await ctrl.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
-    // Ждём загрузки с таймаутом 20 сек.
+    // Ждём onLoadStop с таймаутом 20 сек.
     try {
       await _loadCompleter!.future.timeout(const Duration(seconds: 20));
     } on TimeoutException {
       throw Exception('Timeout загрузки $url');
     }
 
-    // Дополнительная пауза — VK подгружает карточки через JS после onLoadStop.
-    await Future.delayed(const Duration(milliseconds: 800));
+    // Ждём пока SPA отрендерит нужные элементы.
+    if (waitForSelector != null) {
+      final selectorEsc = waitForSelector.replaceAll("'", r"\'");
+      const maxAttempts = 25; // 25 * 400мс = 10 сек
+      var found = false;
+      for (var i = 0; i < maxAttempts; i++) {
+        await Future.delayed(const Duration(milliseconds: 400));
+        final res = await ctrl.evaluateJavascript(
+          source: "document.querySelector('$selectorEsc') != null",
+        );
+        if (res == true || res == 'true') {
+          found = true;
+          // Дополнительная пауза — дать догрузиться остальным карточкам
+          await Future.delayed(const Duration(milliseconds: 600));
+          break;
+        }
+      }
+      if (!found) {
+        // Не критично — отдадим что есть, парсер может найти JSON в скриптах
+      }
+    } else {
+      await Future.delayed(const Duration(milliseconds: 800));
+    }
 
     final html = await ctrl.evaluateJavascript(
       source: 'document.documentElement.outerHTML',
@@ -155,15 +189,15 @@ class VkFeedScraper {
   }
 
   Future<List<PlaylistEntity>> fetchHome() async {
-    const url = 'https://vk.com/video';
+    const url = 'https://vkvideo.ru/';
     try {
-      final html = await _fetchHtml(url);
+      final html = await _fetchHtml(url, waitForSelector: '[data-mvid], .video-card, .VideoCard, [data-video]');
       final videos = _parseCards(html);
       lastSnapshot = ScraperDebugSnapshot(
         url: url,
         statusCode: 200,
         bodyLength: html.length,
-        bodyPreview: html.substring(0, html.length > 3000 ? 3000 : html.length),
+        bodyPreview: _smartPreview(html),
         cookieShort: await _readCookieNames(),
         parsedCount: videos.length,
         error: '',
@@ -188,15 +222,15 @@ class VkFeedScraper {
 
   Future<List<VideoEntity>> search(String query) async {
     if (query.trim().isEmpty) return const [];
-    final url = 'https://vk.com/video?q=${Uri.encodeQueryComponent(query)}';
+    final url = 'https://vkvideo.ru/search?q=${Uri.encodeQueryComponent(query)}';
     try {
-      final html = await _fetchHtml(url);
+      final html = await _fetchHtml(url, waitForSelector: '[data-mvid], .video-card, .VideoCard, [data-video]');
       final videos = _parseCards(html);
       lastSnapshot = ScraperDebugSnapshot(
         url: url,
         statusCode: 200,
         bodyLength: html.length,
-        bodyPreview: html.substring(0, html.length > 3000 ? 3000 : html.length),
+        bodyPreview: _smartPreview(html),
         cookieShort: await _readCookieNames(),
         parsedCount: videos.length,
         error: '',
@@ -326,6 +360,34 @@ class VkFeedScraper {
       }
     }
     return null;
+  }
+
+  /// Делает "умное" превью: если в HTML найдены карточки видео — показывает
+  /// окрестности первой найденной, чтобы я мог увидеть реальную структуру.
+  String _smartPreview(String html) {
+    final markers = [
+      RegExp(r'data-mvid='),
+      RegExp(r'data-video='),
+      RegExp(r'class="[^"]*VideoCard'),
+      RegExp(r'class="[^"]*video-card'),
+      RegExp(r'"video-?\d+_\d+"'),
+      RegExp(r'/video-?\d+_\d+'),
+    ];
+    int? cardPos;
+    for (final re in markers) {
+      final m = re.firstMatch(html);
+      if (m != null) {
+        cardPos = m.start;
+        break;
+      }
+    }
+
+    if (cardPos != null) {
+      final start = cardPos > 500 ? cardPos - 500 : 0;
+      final end = cardPos + 2500 > html.length ? html.length : cardPos + 2500;
+      return '... [смещение $start из ${html.length}] ...\n${html.substring(start, end)}';
+    }
+    return html.substring(0, html.length > 3000 ? 3000 : html.length);
   }
 
   String _unescape(String s) {
