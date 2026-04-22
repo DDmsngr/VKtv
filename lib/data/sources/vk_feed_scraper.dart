@@ -274,7 +274,7 @@ class VkFeedScraper {
     final token = ++_loadToken;
 
     // Инжектируем перехватчик ПЕРЕД loadUrl чтобы он поймал первые запросы
-    const interceptorScript = """
+    final interceptorScript = """
 (function() {
   if (window.__vktv_patched) return;
   window.__vktv_patched = true;
