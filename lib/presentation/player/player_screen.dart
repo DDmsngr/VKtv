@@ -72,7 +72,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
 
     await _player.open(Media(streamUrl));
-    // Даём Surface время присоединиться к декодеру (критично на LDPlayer)
+    // Подписываемся на videoParams — когда libmpv найдёт видео-трек,
+    // форсируем перерисовку виджета (решает чёрный экран на LDPlayer)
+    _player.stream.videoParams.listen((_) {
+      if (mounted) setState(() {});
+    });
     await Future.delayed(const Duration(milliseconds: 500));
     if (mounted) setState(() => _loading = false);
 
@@ -141,9 +145,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         },
         child: Stack(
           children: [
-            // Видео
-            Center(
-              child: Video(controller: _controller),
+            // Видео — SizedBox.expand гарантирует ненулевой размер Surface
+            // на эмуляторах (LDPlayer) где Flutter иначе создаёт Surface 0x0
+            Positioned.fill(
+              child: Video(
+                controller: _controller,
+                fill: Colors.black,
+                filterQuality: FilterQuality.low,
+                fit: BoxFit.contain,
+              ),
             ),
 
             // Спиннер загрузки
